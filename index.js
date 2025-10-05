@@ -686,7 +686,7 @@ async function handleButton(interaction) {
 
     try {
         if (customId.startsWith('ticket_')) {
-            if (!isStaff) return interaction.editReply({ content: 'You must be a staff member to perform ticket actions.', ephemeral: true });
+            if (!isStaff && customId !== 'ticket_admin_delete') return interaction.editReply({ content: 'You must be a staff member to perform ticket actions.', ephemeral: true });
 
             const channelId = interaction.channel.id;
             const staffId = interaction.user.id;
@@ -723,7 +723,8 @@ async function handleButton(interaction) {
                     break;
                 
                 case 'ticket_finalize_delete':
-                    if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can finalize and delete tickets.', ephemeral: true });
+                    // FIX: Allow all staff to finalize (since they completed the soft-close)
+                    if (!isStaff) return interaction.editReply({ content: 'You must be a staff member to finalize and delete tickets.', ephemeral: true });
                     await handleDeleteLogic(interaction, channelId, staffId, false);
                     break;
             }
@@ -1033,7 +1034,7 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
     const isFinalizeDelete = interaction.customId === 'ticket_finalize_delete';
     
     // --- IN-MEMORY TICKET LOG CHECK ---
-    const log = getActiveTicketLog(channelId) || { creator_id: 'Unknown', ticket_type: 'Unknown Ticket' }; // Fallback for admin delete
+    const log = getActiveTicketLog(channelId) || { creator_id: 'Unknown', ticket_type: 'Unknown Ticket', is_soft_closed: isFinalizeDelete }; // Fallback for admin delete
     
     // Check if the ticket should be soft-closed first (only applies to Finalize & Delete button)
     if (isFinalizeDelete && !log.is_soft_closed) {
@@ -1046,7 +1047,8 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
 
         // 2. Fetch all messages for transcript
         const creator = await interaction.guild.members.fetch(log.creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
-        const messages = await channel.messages.fetch({ limit: 200 }); 
+        // FIX: The Discord API limit for messages per fetch is 100.
+        const messages = await channel.messages.fetch({ limit: 100 }); 
         const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
         const htmlContent = generateHtmlTranscript(sortedMessages, creator);
 
