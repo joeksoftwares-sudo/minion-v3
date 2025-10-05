@@ -1,740 +1,1009 @@
-// Discord Ticket System Bot Logic (Node.js)
-// Features: Multi-Type Tickets, Supabase Persistence, Auto-Unclaim Timer, Manual /panel Command.
+// Discord Ticket System Bot - Built for Railway.app with PostgreSQL
+// Requires 'discord.js' and 'pg' packages.
 
-// --- 1. IMPORTS AND DEPENDENCIES ---
-const { 
-    Client, 
-    GatewayIntentBits, 
-    Partials, 
-    Collection, 
-    EmbedBuilder, 
-    ActionRowBuilder, 
-    ButtonBuilder, 
-    ButtonStyle, 
-    PermissionsBitField, 
-    ChannelType, 
-    SlashCommandBuilder,
-    ModalBuilder, 
-    TextInputBuilder, 
-    TextInputStyle
+const {
+    Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder,
+    SelectMenuBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder,
+    TextInputStyle, ChannelType, PermissionsBitField, AttachmentBuilder,
+    Collection
 } = require('discord.js');
-const { createClient } = require('@supabase/supabase-js');
-const { v4: uuidv4 } = require('uuid'); 
+const { Client: PgClient } = require('pg');
 
-// --- 2. BOT CONFIGURATION (MUST BE SET VIA ENVIRONMENT VARIABLES) ---
-const TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID = process.env.GUILD_ID; // Guild where commands and channels are created
-const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID; // Parent category for new tickets
-const TICKET_LOG_CHANNEL_ID = process.env.TICKET_LOG_CHANNEL_ID; // Channel for transcript links
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID; // Role that can claim/close tickets
+// --- Configuration from Environment Variables ---
+// All these variables MUST be set in your Railway environment!
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const POSTGRES_URL = process.env.POSTGRES_URL; // Railway provides this automatically when linked
+const GUILD_ID = process.env.GUILD_ID;
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
+const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; 
+const TICKET_PANEL_CHANNEL_ID = process.env.TICKET_PANEL_CHANNEL_ID;
+const TRANSCRIPT_LOG_CHANNEL_ID = process.env.TRANSCRIPT_LOG_CHANNEL_ID;
+const ADMIN_APPROVAL_CHANNEL_ID = process.env.ADMIN_APPROVAL_CHANNEL_ID;
+const MEDIA_CATEGORY_ID = process.env.MEDIA_CATEGORY_ID;
+const REPORT_CATEGORY_ID = process.env.REPORT_CATEGORY_ID;
+const SUPPORT_CATEGORY_ID = process.env.SUPPORT_CATEGORY_ID;
 
-// Constants
-const TICKET_TABLE = 'tickets'; 
-const STORAGE_BUCKET_NAME = 'transcripts'; 
-const TICKET_LIMIT = 5; // Max active tickets per user
-const UNCLAIM_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes for auto-unclaim
+// Payout Values (Robux)
+const PAYOUT_VALUES = {
+    'General Support': 15,
+    'Report Exploiters': 20,
+    'Apply for Media': 25,
+};
 
-// Internal State Managers
-const activeTimers = new Collection(); // Channel ID -> Timeout object
+// Payout Limits (Robux)
+const PAYOUT_MIN = 300;
+const PAYOUT_MAX = 700;
+const UNCLAIM_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
-// --- 3. SUPABASE INITIALIZATION ---
-let supabase;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+// --- Global State & Cache ---
+// Cache for managing claimed ticket state (since Node.js is single-process)
+const claimedTickets = new Collection();
 
-if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+// --- Database Setup ---
+const db = new PgClient({
+    connectionString: POSTGRES_URL,
+    // Railway handles the connection string, but we explicitly require SSL to be disabled 
+    // for local development if needed, but for production on Railway, it should work fine.
+    // The previous implementation used rejectUnauthorized: false which is safer for cloud providers.
+    ssl: { rejectUnauthorized: false } 
+});
+
+/**
+ * Connects to the database and ensures all required tables exist.
+ */
+async function initializeDatabase() {
     try {
-        // CRITICAL FIX: Explicitly set the schema to 'public' for stable operation.
-        supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-            db: {
-                schema: 'public', 
-            },
-        });
-        console.log("[DB] Supabase client initialized successfully.");
+        await db.connect();
+        console.log('PostgreSQL Connected!');
+
+        // 1. Staff Data Table
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS staff_data (
+                user_id VARCHAR(255) PRIMARY KEY,
+                robux_balance INTEGER DEFAULT 0
+            );
+        `);
+
+        // 2. Ticket Logs Table
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS ticket_logs (
+                ticket_id SERIAL PRIMARY KEY,
+                channel_id VARCHAR(255) UNIQUE NOT NULL,
+                creator_id VARCHAR(255) NOT NULL,
+                ticket_type VARCHAR(50) NOT NULL,
+                start_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                end_time TIMESTAMP WITH TIME ZONE,
+                claimer_id VARCHAR(255),
+                is_claimed BOOLEAN DEFAULT FALSE
+            );
+        `);
+
+        // 3. Transaction Logs Table
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS transaction_logs (
+                transaction_id SERIAL PRIMARY KEY,
+                staff_id VARCHAR(255) NOT NULL REFERENCES staff_data(user_id),
+                amount_paid INTEGER NOT NULL,
+                transaction_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                gamepass_link TEXT NOT NULL,
+                admin_approver_id VARCHAR(255)
+            );
+        `);
+        console.log('Database tables verified/created successfully.');
     } catch (error) {
-        console.error("[DB ERROR] Failed to initialize Supabase client.", error.message);
-    }
-} else {
-    console.warn("[DB WARNING] Supabase environment variables are missing. The bot will run without persistence (data loss on restart is expected).");
-}
-
-// --- 4. DATABASE FUNCTIONS (Supabase) ---
-
-/**
- * Inserts or updates a ticket row in the 'tickets' table.
- */
-async function setTicket(channelId, data) {
-    if (!supabase) return { error: 'DB not initialized' };
-    
-    try {
-        const updateData = { id: channelId, ...data };
-        
-        const { error } = await supabase
-            .from(TICKET_TABLE)
-            .upsert(updateData, { onConflict: 'id' })
-            .select();
-
-        if (error) {
-            console.error(`[DB] UPSERT REJECTED for ${channelId}:`, error);
-            return { error: error };
-        }
-        return { success: true };
-
-    } catch (e) {
-        console.error(`[DB] RUNTIME ERROR during setTicket for ${channelId}:`, e.message);
-        return { error: e };
+        console.error('Failed to initialize database:', error.message);
+        // Exit process if DB connection fails as the bot is non-functional without it.
+        process.exit(1);
     }
 }
 
 /**
- * Retrieves ticket data by channel ID.
+ * Updates a staff member's Robux balance. Creates the user record if it doesn't exist.
+ * @param {string} userId The ID of the staff member.
+ * @param {number} amount The amount to add (can be negative for payout reset).
  */
-async function getTicket(channelId) {
-    if (!supabase) return null;
-    
+async function updateRobuxBalance(userId, amount) {
     try {
-        const { data, error } = await supabase
-            .from(TICKET_TABLE)
-            .select('*')
-            .eq('id', channelId)
-            .single();
-
-        if (error && error.code !== 'PGRST116') { // PGRST116 is 'no rows found'
-            console.error(`[DB] READ ERROR for ticket ${channelId}:`, error);
-            return null;
-        }
-
-        return data;
-    } catch (e) {
-        console.error(`[DB] RUNTIME ERROR during getTicket for ${channelId}:`, e.message);
+        const query = `
+            INSERT INTO staff_data (user_id, robux_balance)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id)
+            DO UPDATE SET robux_balance = staff_data.robux_balance + $2
+            RETURNING robux_balance;
+        `;
+        const result = await db.query(query, [userId, amount]);
+        return result.rows[0].robux_balance;
+    } catch (error) {
+        console.error(`Error updating Robux balance for ${userId}:`, error.message);
         return null;
     }
 }
 
-/**
- * Counts the number of active (isClosed=false) tickets for a specific user ID.
- */
-async function countActiveTickets(userId) {
-    if (!supabase) return 0;
-
-    try {
-        const { count, error } = await supabase
-            .from(TICKET_TABLE)
-            .select('id', { count: 'exact' })
-            .eq('userId', userId)
-            .eq('isClosed', false);
-        
-        if (error) {
-            console.error("[DB] Error counting active tickets:", error);
-            return 0;
-        }
-        return count;
-    } catch (e) {
-        console.error("[DB] Runtime error counting active tickets:", e.message);
-        return 0;
-    }
-}
-
-
-// --- 5. DISCORD CLIENT SETUP & COMMANDS REGISTRATION ---
+// --- Discord Client Setup ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
     ],
-    partials: [Partials.Channel, Partials.GuildMember],
+    partials: [Partials.Channel],
 });
-
-client.commands = new Collection();
-
-// Slash Command Definitions
-const panelCommand = new SlashCommandBuilder()
-    .setName('panel')
-    .setDescription('Posts the main ticket creation panel in the current channel.')
-    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator); // Admin-only
-
-const claimCommand = new SlashCommandBuilder()
-    .setName('claim')
-    .setDescription('Claims the current ticket for a staff member.')
-    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator);
-
-const closeCommand = new SlashCommandBuilder()
-    .setName('close')
-    .setDescription('Closes the current ticket and archives the transcript.')
-    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
-    .addStringOption(option =>
-        option.setName('reason')
-            .setDescription('The reason for closing the ticket.')
-            .setRequired(false));
-
-client.commands.set(panelCommand.name, { data: panelCommand, execute: handlePanelCommand });
-client.commands.set(claimCommand.name, { data: claimCommand, execute: handleClaimCommand });
-client.commands.set(closeCommand.name, { data: closeCommand, execute: handleCloseCommand });
-
-
-// --- 6. EVENT LISTENERS ---
 
 client.once('ready', async () => {
-    console.log(`Bot logged in as ${client.user.tag}`);
-    await registerSlashCommands();
-    // Removed: The old checkAndPostTicketPanel() logic is now gone. 
-    // The panel must be posted manually using /panel.
+    console.log(`Logged in as ${client.user.tag}!`);
+    await initializeDatabase();
+    await registerSlashCommands(client.application.id);
+    await setupTicketPanel();
 });
 
-client.on('interactionCreate', async interaction => {
-    if (interaction.isChatInputCommand()) {
-        const command = client.commands.get(interaction.commandName);
-        if (command) {
-            try {
-                await command.execute(interaction);
-            } catch (error) {
-                console.error(`Error executing command ${interaction.commandName}:`, error);
-                await interaction.reply({ content: 'There was an error while executing this command!', ephemeral: true });
-            }
-        }
-    } else if (interaction.isButton()) {
-        // Handle all three ticket buttons and control buttons
-        const buttonId = interaction.customId;
-        if (buttonId === 'claim_ticket') return handleClaimCommand(interaction);
-        if (buttonId === 'close_ticket') return handleCloseCommand(interaction);
-        
-        if (buttonId.startsWith('create_')) {
-            await handleTicketButton(interaction, buttonId.replace('create_', ''));
-        }
-
-    } else if (interaction.isModalSubmit()) {
-        // Handle all three modal submissions
-        const modalId = interaction.customId;
-        if (modalId === 'media_modal') return handleModalSubmit(interaction, 'media');
-        if (modalId === 'general_modal') return handleModalSubmit(interaction, 'general');
-        if (modalId === 'exploiter_modal') return handleModalSubmit(interaction, 'exploiter');
-    }
-});
-
-client.on('messageCreate', async message => {
-    if (!message.inGuild() || message.author.bot || message.channel.parentId !== TICKET_CATEGORY_ID) return;
-    
-    const channelId = message.channel.id;
-    const ticketData = await getTicket(channelId);
-    if (!ticketData || ticketData.isClosed || !ticketData.claimedBy) return; // Only process active, claimed tickets
-
-    const isStaff = message.member.roles.cache.has(STAFF_ROLE_ID);
-    const isClaimant = message.author.id === ticketData.claimedBy;
-
-    if (!isStaff && message.author.id === ticketData.userId) {
-        // Logic: User replied to the claimed ticket -> Reset the 20-minute staff timer.
-        const newTimestamp = new Date().toISOString(); 
-        await setTicket(channelId, { lastUserReplyAt: newTimestamp });
-        startUnclaimTimer(channelId, ticketData.claimedBy);
-        console.log(`[Timer] Reset for ticket ${channelId}.`);
-
-    } else if (isClaimant) {
-        // Logic: Claiming staff replied -> Clear the timer.
-        if (activeTimers.has(channelId)) {
-            clearTimeout(activeTimers.get(channelId));
-            activeTimers.delete(channelId);
-            console.log(`[Timer] Cleared for ticket ${channelId}.`);
-            
-            // Optionally update the control message footer to remove the timer status.
-            try {
-                const controlMessage = await message.channel.messages.fetch(ticketData.controlMessageId);
-                const embed = EmbedBuilder.from(controlMessage.embeds[0])
-                    .setFooter(null); // Remove footer
-                await controlMessage.edit({ embeds: [embed] });
-            } catch (e) {
-                // Ignore failure if message is not found/editable
-            }
-        }
-    }
-});
-
-
-// --- 7. TICKET PANEL MANAGEMENT (/panel command handler) ---
+// --- Command and Panel Setup Functions ---
 
 /**
- * Creates the embed and action row components for the ticket panel.
+ * Registers global slash commands.
+ * @param {string} clientId The application ID.
  */
-function createPanelComponentsAndEmbed() {
-    const embed = new EmbedBuilder()
-        .setTitle('🎫 Discord Support & Application Center')
-        .setDescription('Please select the appropriate button below to open a ticket. **Only 1 active ticket per person allowed.**')
-        .setColor(0x007FFF);
+async function registerSlashCommands(clientId) {
+    const commands = [
+        {
+            name: 'check-robux',
+            description: 'Check your current Robux payout balance.',
+        },
+        {
+            name: 'payout',
+            description: 'Initiate a Robux payout request.',
+        },
+        {
+            name: 'setup-panel',
+            description: 'ADMIN ONLY: Deploys the persistent ticket panel.',
+            default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
+        }
+    ];
 
-    const row = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('create_media')
-                .setLabel('🎥 Media Application')
-                .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-                .setCustomId('create_general')
-                .setLabel('💬 General Support')
-                .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-                .setCustomId('create_exploiter')
-                .setLabel('⚠️ Exploiter Report')
-                .setStyle(ButtonStyle.Danger)
-        );
-    
+    try {
+        const guild = client.guilds.cache.get(GUILD_ID);
+        if (guild) {
+            await guild.commands.set(commands);
+            console.log('Slash commands registered.');
+        } else {
+            console.warn(`Guild with ID ${GUILD_ID} not found. Skipping command registration.`);
+        }
+    } catch (error) {
+        console.error('Error registering slash commands:', error);
+    }
+}
+
+/**
+ * Creates the main ticket panel embed and select menu.
+ * @returns {object} The embed and action row components.
+ */
+function createTicketPanel() {
+    const embed = new EmbedBuilder()
+        .setTitle('🎫 Official Support Ticket System')
+        .setDescription(
+            'Welcome to the Server Support System. Please select the category that best fits your inquiry from the dropdown menu below. This will automatically open a private channel for you to speak with our staff.'
+        )
+        .setColor('#5865F2') // Discord Primary Blue/Purple
+        .setThumbnail(client.user.displayAvatarURL())
+        .setFooter({ text: 'Powered by the Bot Team' })
+        .setTimestamp();
+
+    const selectMenu = new SelectMenuBuilder()
+        .setCustomId('select_ticket_type')
+        .setPlaceholder('Select a Ticket Category...')
+        .addOptions([
+            {
+                label: 'Apply for Media',
+                description: 'For content creators interested in partnership.',
+                value: 'Apply for Media',
+                emoji: '🎥',
+            },
+            {
+                label: 'Report Exploiters',
+                description: 'Report rule-breakers or exploiters privately.',
+                value: 'Report Exploiters',
+                emoji: '🚨',
+            },
+            {
+                label: 'General Support',
+                description: 'For all general questions, help, or issues.',
+                value: 'General Support',
+                emoji: '❓',
+            },
+        ]);
+
+    const row = new ActionRowBuilder().addComponents(selectMenu);
+
     return { embed, row };
 }
 
 /**
- * Posts the ticket panel message to a specific channel.
+ * Posts the persistent ticket panel to the designated channel.
  */
-async function postTicketPanelMessage(channel) {
-    if (!channel) return false;
-    
-    try {
-        const { embed, row } = createPanelComponentsAndEmbed();
-        await channel.send({ embeds: [embed], components: [row] });
-        console.log(`[Panel] New ticket panel posted successfully in #${channel.name}.`);
-        return true;
-    } catch (e) {
-        console.error("[Panel] Error posting panel:", e);
-        return false;
+async function setupTicketPanel() {
+    const channel = client.channels.cache.get(TICKET_PANEL_CHANNEL_ID);
+    if (!channel) return console.error('Ticket Panel Channel ID not found.');
+
+    const { embed, row } = createTicketPanel();
+
+    // In a real scenario, we use the /setup-panel command, but this ensures the function is called on startup.
+    console.log('Ticket panel generated. Use /setup-panel to deploy it.');
+}
+
+// --- Transcript and Logging Helper ---
+
+/**
+ * Generates a simple, Discord-styled HTML transcript of a channel's messages.
+ * @param {Collection<string, Message>} messages - The messages to include.
+ * @param {GuildMember} creator - The ticket creator.
+ * @returns {string} The HTML content.
+ */
+function generateHtmlTranscript(messages, creator) {
+    let content = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Ticket Transcript - ${creator.user.tag}</title>
+        <style>
+            body { background-color: #36393f; color: #dcddde; font-family: 'Inter', sans-serif; }
+            .chat-log { width: 90%; max-width: 800px; margin: 20px auto; padding: 20px; background-color: #36393f; }
+            .message { margin-bottom: 10px; padding: 5px 10px; border-radius: 4px; }
+            .header { color: #8e9297; font-size: 14px; margin-bottom: 5px; border-bottom: 1px solid #4f545c; padding-bottom: 3px; }
+            .username { font-weight: bold; }
+            .bot-tag { background-color: #5865f2; color: white; padding: 2px 4px; border-radius: 3px; font-size: 10px; margin-left: 5px; }
+            .content { font-size: 15px; margin-top: 5px; line-height: 1.4; }
+        </style>
+    </head>
+    <body>
+        <div class="chat-log">
+            <h1>Ticket Transcript for ${creator.user.tag}</h1>
+            <p>Ticket Opened: ${new Date().toLocaleString()}</p>
+            <hr>
+    `;
+
+    messages.forEach(msg => {
+        const timestamp = new Date(msg.createdTimestamp).toLocaleString();
+        const usernameColor = msg.member?.displayHexColor || '#ffffff';
+        const botTag = msg.author.bot ? '<span class="bot-tag">BOT</span>' : '';
+
+        content += `
+            <div class="message">
+                <div class="header">
+                    <span class="username" style="color: ${usernameColor};">${msg.author.username}</span>
+                    ${botTag}
+                    <span style="float: right; font-size: 12px;">${timestamp}</span>
+                </div>
+                <div class="content">${msg.content.replace(/\n/g, '<br>')}</div>
+            </div>
+        `;
+    });
+
+    content += `
+        </div>
+    </body>
+    </html>
+    `;
+    return content;
+}
+
+// --- Interaction Handlers ---
+
+client.on('interactionCreate', async interaction => {
+    if (interaction.isCommand()) {
+        await handleSlashCommand(interaction);
+    } else if (interaction.isSelectMenu()) {
+        await handleSelectMenu(interaction);
+    } else if (interaction.isModalSubmit()) {
+        await handleModalSubmit(interaction);
+    } else if (interaction.isButton()) {
+        await handleButton(interaction);
+    }
+});
+
+/**
+ * Handles all slash command interactions.
+ * @param {CommandInteraction} interaction
+ */
+async function handleSlashCommand(interaction) {
+    if (!interaction.inGuild()) return interaction.reply({ content: 'This command must be run in a server.', ephemeral: true });
+
+    // Check if the user has the Staff role for the two main commands
+    const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
+
+    switch (interaction.commandName) {
+        case 'setup-panel':
+            // Check for Administrator permission
+            if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+                return interaction.reply({ content: 'You need Administrator permissions to set up the panel.', ephemeral: true });
+            }
+            const { embed, row } = createTicketPanel();
+            await interaction.channel.send({ embeds: [embed], components: [row] });
+            await interaction.reply({ content: 'Ticket panel deployed successfully.', ephemeral: true });
+            break;
+
+        case 'check-robux':
+            if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
+
+            try {
+                const result = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [interaction.user.id]);
+                const balance = result.rows.length > 0 ? result.rows[0].robux_balance : 0;
+
+                const embed = new EmbedBuilder()
+                    .setTitle('💰 Robux Payout Balance')
+                    .setColor('#FFC0CB') // Pink/Payout Color
+                    .setDescription(`
+                        Your current earned balance is **${balance} R$**.
+                        ---
+                        **Payout Rules:**
+                        - **Min Request:** ${PAYOUT_MIN} R$
+                        - **Max Request:** ${PAYOUT_MAX} R$
+                        - Use \`/payout\` when you are ready to request a payment.
+                    `);
+                await interaction.reply({ embeds: [embed], ephemeral: true });
+            } catch (error) {
+                console.error('Error checking balance:', error);
+                await interaction.reply({ content: 'An error occurred while fetching your balance.', ephemeral: true });
+            }
+            break;
+
+        case 'payout':
+            if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
+
+            const modal = new ModalBuilder()
+                .setCustomId('payout_modal')
+                .setTitle('Robux Payout Request');
+
+            const gamepassInput = new TextInputBuilder()
+                .setCustomId('gamepass_link')
+                .setLabel('Roblox Gamepass Link')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('https://www.roblox.com/game-pass/...')
+                .setRequired(true);
+
+            const amountInput = new TextInputBuilder()
+                .setCustomId('payout_amount')
+                .setLabel('Requested Robux Amount (R$)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder(`Between ${PAYOUT_MIN} and ${PAYOUT_MAX}`)
+                .setRequired(true);
+
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(amountInput),
+                new ActionRowBuilder().addComponents(gamepassInput)
+            );
+
+            await interaction.showModal(modal);
+            break;
     }
 }
 
 /**
- * Handler for the /panel slash command.
+ * Handles the selection from the ticket panel dropdown.
+ * @param {SelectMenuInteraction} interaction
  */
-async function handlePanelCommand(interaction) {
-    if (!interaction.inGuild()) return;
+async function handleSelectMenu(interaction) {
+    if (interaction.customId !== 'select_ticket_type') return;
 
-    // Check for administrator permission (already defined in command setup, but good practice to double check)
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return interaction.reply({ content: 'You must be an administrator to use the `/panel` command.', ephemeral: true });
+    const ticketType = interaction.values[0];
+
+    // 1. Show Modal for Media Applications
+    if (ticketType === 'Apply for Media') {
+        const modal = new ModalBuilder()
+            .setCustomId('media_application_modal')
+            .setTitle('Media Application Form');
+
+        const linkInput = new TextInputBuilder()
+            .setCustomId('platform_link')
+            .setLabel('Link to main content platform (YT, TikTok, etc.)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g., youtube.com/@YourChannel')
+            .setRequired(true);
+
+        const countInput = new TextInputBuilder()
+            .setCustomId('follower_count')
+            .setLabel('Current follower/subscriber count (Number only)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g., 5000')
+            .setRequired(true);
+
+        const planInput = new TextInputBuilder()
+            .setCustomId('content_plan')
+            .setLabel('Content plan for the server (Detailed description)')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true);
+
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(linkInput),
+            new ActionRowBuilder().addComponents(countInput),
+            new ActionRowBuilder().addComponents(planInput)
+        );
+
+        return interaction.showModal(modal);
     }
-    
-    await interaction.deferReply({ ephemeral: true });
-    
-    const success = await postTicketPanelMessage(interaction.channel);
 
-    if (success) {
-        await interaction.editReply({ content: '✅ Ticket panel successfully posted in this channel.', ephemeral: true });
-    } else {
-        await interaction.editReply({ content: '❌ Failed to post the ticket panel. Check the bot\'s permissions in this channel or the console for errors.', ephemeral: true });
+    // 2. Direct Channel Creation for other types
+    await interaction.deferReply({ ephemeral: true });
+    await createTicketChannel(interaction, ticketType);
+}
+
+/**
+ * Handles the submission of the Media Application Modal.
+ * @param {ModalSubmitInteraction} interaction
+ */
+async function handleModalSubmit(interaction) {
+    if (interaction.customId === 'media_application_modal') {
+        await interaction.deferReply({ ephemeral: true });
+        const link = interaction.fields.getTextInputValue('platform_link');
+        const count = interaction.fields.getTextInputValue('follower_count');
+        const plan = interaction.fields.getTextInputValue('content_plan');
+
+        const details = `
+            **Platform Link:** ${link}
+            **Follower/Subscriber Count:** ${count}
+            **Content Plan:**\n${plan}
+        `;
+
+        await createTicketChannel(interaction, 'Apply for Media', details);
+    } else if (interaction.customId === 'payout_modal') {
+        await handlePayoutRequest(interaction);
     }
 }
 
-
-// --- 8. MODAL HANDLERS ---
-
-// Defines the content for each ticket type (used by handleTicketButton and handleModalSubmit)
-const ticketConfigs = {
-    media: {
-        title: 'Media Application',
-        color: 0x00FF00,
-        fields: [
-            { customId: 'q1_link', label: "What is the media link you are applying for?", style: TextInputStyle.Short, required: true },
-            { customId: 'q2_reason', label: "Why do you think you should be granted media status?", style: TextInputStyle.Paragraph, required: true }
-        ],
-        channelPrefix: 'media',
-    },
-    general: {
-        title: 'General Support',
-        color: 0xFFA500,
-        fields: [
-            { customId: 'q1_summary', label: "Summarize your issue or request in one sentence.", style: TextInputStyle.Short, required: true },
-            { customId: 'q2_detail', label: "Describe your issue in detail (steps taken, errors, etc.)", style: TextInputStyle.Paragraph, required: true }
-        ],
-        channelPrefix: 'general',
-    },
-    exploiter: {
-        title: 'Exploiter Report',
-        color: 0xFF0000,
-        fields: [
-            { customId: 'q1_target', label: "Exploiter's Username or ID (or 'Anonymous')", style: TextInputStyle.Short, required: true },
-            { customId: 'q2_proof', label: "Detailed Description of the Exploit (include video proof link if possible)", style: TextInputStyle.Paragraph, required: true }
-        ],
-        channelPrefix: 'exploit',
-    }
-};
-
 /**
- * Handles all ticket button clicks (opens the correct modal).
+ * Handles staff payout request submission.
+ * @param {ModalSubmitInteraction} interaction
  */
-async function handleTicketButton(interaction, type) {
+async function handlePayoutRequest(interaction) {
     await interaction.deferReply({ ephemeral: true });
-    
-    const activeCount = await countActiveTickets(interaction.user.id);
-    if (activeCount >= TICKET_LIMIT) {
-        return interaction.editReply({ 
-            content: `❌ You already have ${activeCount} active tickets (Limit: ${TICKET_LIMIT}). Please close them before opening a new one.`, 
-            ephemeral: true 
+    const amountStr = interaction.fields.getTextInputValue('payout_amount');
+    const gamepassLink = interaction.fields.getTextInputValue('gamepass_link');
+    const staffId = interaction.user.id;
+
+    const amount = parseInt(amountStr);
+
+    if (isNaN(amount) || amount < PAYOUT_MIN || amount > PAYOUT_MAX) {
+        return interaction.editReply({
+            content: `❌ Invalid amount. You must request between ${PAYOUT_MIN} R$ and ${PAYOUT_MAX} R$.`
         });
     }
 
-    const config = ticketConfigs[type];
-    if (!config) return interaction.editReply({ content: 'Invalid ticket type selected.', ephemeral: true });
-    
-    const modal = new ModalBuilder()
-        .setCustomId(`${type}_modal`)
-        .setTitle(config.title);
-
-    config.fields.forEach(fieldConfig => {
-        const input = new TextInputBuilder()
-            .setCustomId(fieldConfig.customId)
-            .setLabel(fieldConfig.label)
-            .setStyle(fieldConfig.style)
-            .setRequired(fieldConfig.required);
-        modal.addComponents(new ActionRowBuilder().addComponents(input));
-    });
-
-    await interaction.showModal(modal);
-    // Modal submission handles the final interaction response.
-}
-
-/**
- * Handles all modal submissions (processes input and creates the channel).
- */
-async function handleModalSubmit(interaction, type) {
-    await interaction.deferReply({ ephemeral: true });
-
-    const config = ticketConfigs[type];
-    const user = interaction.user;
-
-    const qna = {};
-    config.fields.forEach(fieldConfig => {
-        // Map the customId back to the label for storage
-        qna[fieldConfig.label] = interaction.fields.getTextInputValue(fieldConfig.customId);
-    });
-
-    const channelName = `${config.channelPrefix}-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '-')}`.substring(0, 50);
-
-    const ticketData = {
-        userId: user.id,
-        type: config.title.toLowerCase().replace(/\s/g, '_'),
-        createdAt: new Date().toISOString(),
-        isClosed: false,
-        claimedBy: null,
-        qna: qna,
-    };
-    
-    await createTicketChannel(interaction, channelName, ticketData, config.color);
-}
-
-
-// --- 9. TICKET CREATION CORE FUNCTION ---
-
-/**
- * Creates the Discord channel, inserts ticket data into Supabase, and posts the control message.
- */
-async function createTicketChannel(interaction, channelName, ticketData, color) {
-    const guild = interaction.guild;
-    const user = interaction.user;
-
     try {
-        // 1. Create the Discord Channel
+        // 1. Check current balance
+        const balanceResult = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [staffId]);
+        const currentBalance = balanceResult.rows.length > 0 ? balanceResult.rows[0].robux_balance : 0;
+
+        if (amount > currentBalance) {
+            return interaction.editReply({
+                content: `❌ Your current balance is only **${currentBalance} R$**. You cannot request **${amount} R$**.`
+            });
+        }
+
+        // 2. Send to Admin Approval Channel
+        const approvalChannel = client.channels.cache.get(ADMIN_APPROVAL_CHANNEL_ID);
+        if (!approvalChannel) return interaction.editReply({ content: 'An internal error occurred: Approval channel not found.' });
+
+        const approvalEmbed = new EmbedBuilder()
+            .setTitle('💵 NEW ROBux PAYOUT REQUEST')
+            .setColor('#FFA500') // Orange/Alert Color
+            .addFields(
+                { name: 'Staff Member', value: interaction.user.tag, inline: true },
+                { name: 'Requested Amount', value: `**${amount} R$**`, inline: true },
+                { name: 'Gamepass Link', value: gamepassLink },
+                { name: 'Staff ID', value: staffId },
+                { name: 'Request ID', value: `${staffId}-${Date.now()}` } // Unique ID for button
+            )
+            .setTimestamp();
+
+        const approveButton = new ButtonBuilder()
+            .setCustomId(`payout_approve_${staffId}_${amount}`)
+            .setLabel('✅ Approve Payout')
+            .setStyle(ButtonStyle.Success);
+
+        const denyButton = new ButtonBuilder()
+            .setCustomId(`payout_deny_${staffId}_${amount}`)
+            .setLabel('❌ Deny Payout')
+            .setStyle(ButtonStyle.Danger);
+
+        const row = new ActionRowBuilder().addComponents(approveButton, denyButton);
+
+        await approvalChannel.send({
+            content: `<@&${ADMIN_ROLE_ID}> New payout request to review!`,
+            embeds: [approvalEmbed],
+            components: [row]
+        });
+
+        await interaction.editReply({ content: `✅ Your payout request for **${amount} R$** has been sent for admin approval!` });
+
+    } catch (error) {
+        console.error('Error handling payout request:', error);
+        await interaction.editReply({ content: 'An error occurred during the payout request process.' });
+    }
+}
+
+
+/**
+ * Creates the actual ticket channel with correct permissions and initial message.
+ * @param {Interaction} interaction - The triggering interaction.
+ * @param {string} ticketType - The type of ticket.
+ * @param {string} details - Optional extra details (e.g., from Media form).
+ */
+async function createTicketChannel(interaction, ticketType, details = '') {
+    try {
+        const guild = interaction.guild;
+        const user = interaction.user;
+        const ticketCategory = getCategoryId(ticketType);
+
+        if (!ticketCategory) {
+            return interaction.editReply({ content: 'Ticket category not configured. Please contact an admin.', ephemeral: true });
+        }
+
+        // Check for existing open ticket by this user (prevent spam)
+        const openTicket = await db.query('SELECT channel_id FROM ticket_logs WHERE creator_id = $1 AND end_time IS NULL', [user.id]);
+        if (openTicket.rows.length > 0) {
+            const channelId = openTicket.rows[0].channel_id;
+            return interaction.editReply({ content: `You already have an open ticket: <#${channelId}>.`, ephemeral: true });
+        }
+
+
+        // 1. Create Channel
         const channel = await guild.channels.create({
-            name: channelName,
+            name: `${ticketType.toLowerCase().replace(/\s/g, '-')}-${user.username.toLowerCase()}`,
             type: ChannelType.GuildText,
-            parent: TICKET_CATEGORY_ID,
-            topic: `${ticketData.type} ticket for ${user.tag} (${user.id})`,
+            parent: ticketCategory,
             permissionOverwrites: [
-                { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
-                { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-                // Staff role gets immediate view/send access
-                { id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }, 
+                {
+                    id: guild.id, // @everyone
+                    deny: [PermissionsBitField.Flags.ViewChannel],
+                },
+                {
+                    id: user.id, // Ticket Creator
+                    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+                },
+                {
+                    id: STAFF_ROLE_ID, // Staff Role
+                    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+                },
+                {
+                    id: ADMIN_ROLE_ID, // Admin Role
+                    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+                }
             ],
         });
 
-        // 2. Insert into Supabase (add channel ID to data)
-        const dbResult = await setTicket(channel.id, { ...ticketData, id: channel.id });
-        if (dbResult.error) {
-             // Rollback: delete the channel if the DB operation failed.
-             await channel.delete('Database insertion failed. Ghost ticket prevention.').catch(() => {});
-             return interaction.editReply({ content: `❌ Ticket creation failed: Could not save data to the database. The channel was automatically deleted. Please contact a server admin.`, ephemeral: true });
-        }
+        // 2. Store in Database
+        await db.query(
+            'INSERT INTO ticket_logs (channel_id, creator_id, ticket_type) VALUES ($1, $2, $3)',
+            [channel.id, user.id, ticketType]
+        );
 
-        // 3. Construct the initial embed
-        const embed = new EmbedBuilder()
-            .setTitle(`New Ticket: ${ticketData.type.toUpperCase().replace(/_/g, ' ')}`)
-            .setDescription('Ticket is currently **unclaimed**.\n**A staff member will be with you shortly to review your request.**')
-            .addFields(
-                { name: 'User', value: `<@${user.id}>`, inline: true },
-                { name: 'Ticket Type', value: ticketData.type.replace(/_/g, ' ').toUpperCase(), inline: true }
-            );
+        // 3. Send Initial Message with Buttons
+        const buttons = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('claim_ticket').setLabel('Claim').setStyle(ButtonStyle.Primary).setEmoji('🔒'),
+            new ButtonBuilder().setCustomId('close_ticket').setLabel('Close').setStyle(ButtonStyle.Secondary).setEmoji('💾'),
+            new ButtonBuilder().setCustomId('delete_ticket').setLabel('Delete').setStyle(ButtonStyle.Danger).setEmoji('❌'),
+        );
 
-        // Add Q&A fields
-        for (const [key, value] of Object.entries(ticketData.qna)) {
-            embed.addFields({ name: `[Q] ${key}`, value: value.length > 1024 ? value.substring(0, 1021) + '...' : value, inline: false });
-        }
-            
-        embed.setColor(color) 
-             .setTimestamp();
-        
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId('claim_ticket')
-                    .setLabel('Claim Ticket')
-                    .setEmoji('✋')
-                    .setStyle(ButtonStyle.Success),
-                new ButtonBuilder()
-                    .setCustomId('close_ticket')
-                    .setLabel('Close Ticket')
-                    .setEmoji('🔒')
-                    .setStyle(ButtonStyle.Danger)
-            );
-
-        // 4. Send the initial message with controls
-        const controlMessage = await channel.send({ 
-            content: `<@&${STAFF_ROLE_ID}> New Ticket opened by <@${user.id}>!`, 
-            embeds: [embed], 
-            components: [row] 
-        });
-
-        // 5. Update the ticket data with the control message ID
-        await setTicket(channel.id, { controlMessageId: controlMessage.id });
-
-        // 6. Final success reply
-        await interaction.editReply({ 
-            content: `✅ Your ticket has been created! Head over to ${channel}.`, 
-            ephemeral: true 
-        });
-
-    } catch (e) {
-        console.error(`Error during ticket creation for ${user.id}:`, e);
-        await interaction.editReply({ content: 'An unexpected error occurred during ticket creation. Please try again.', ephemeral: true });
-    }
-}
-
-
-// --- 10. COMMAND LOGIC (Claim/Close) ---
-
-async function handleClaimCommand(interaction) {
-    await interaction.deferReply({ ephemeral: true });
-    
-    const channel = interaction.channel;
-    const staffId = interaction.user.id;
-    
-    if (channel.parentId !== TICKET_CATEGORY_ID || !interaction.member.roles.cache.has(STAFF_ROLE_ID)) {
-        return interaction.editReply({ content: 'This command can only be used by staff in a ticket channel.', ephemeral: true });
-    }
-
-    const ticketData = await getTicket(channel.id);
-    if (!ticketData || ticketData.isClosed) {
-        return interaction.editReply({ content: 'This is not an active ticket.', ephemeral: true });
-    }
-
-    if (ticketData.claimedBy) {
-        return interaction.editReply({ content: `This ticket is already claimed by <@${ticketData.claimedBy}>.`, ephemeral: true });
-    }
-
-    // 1. Update database
-    const updateResult = await setTicket(channel.id, { claimedBy: staffId, lastUserReplyAt: new Date().toISOString() });
-    if (updateResult.error) {
-        return interaction.editReply({ content: 'Failed to update database. Claiming failed.', ephemeral: true });
-    }
-    
-    // 2. Update the control message
-    try {
-        const controlMessage = await channel.messages.fetch(ticketData.controlMessageId);
-        const embed = EmbedBuilder.from(controlMessage.embeds[0])
-            .setDescription(`Ticket claimed by <@${staffId}>.`)
-            .setColor(0x00FF00); // Green
-        
-        // Add a footer indicating the timer status
-        embed.setFooter({ text: 'Auto-unclaim timer started. Staff must reply within 20 mins of the user\'s message.' });
-        
-        await controlMessage.edit({ embeds: [embed], components: [controlMessage.components[0]] });
-    } catch (e) {
-        console.error("Could not edit control message after claim:", e);
-    }
-
-    // 3. Send channel notification and start timer
-    await channel.send({ content: `<@${staffId}> has claimed this ticket. Please be patient while they review your request.` });
-    await interaction.editReply({ content: 'You have successfully claimed the ticket. The auto-unclaim timer is now active.', ephemeral: true });
-    startUnclaimTimer(channel.id, staffId);
-}
-
-
-async function handleCloseCommand(interaction) {
-    await interaction.deferReply({ ephemeral: true });
-
-    const channel = interaction.channel;
-    const reason = interaction.options?.getString('reason') || 'No reason provided.';
-
-    if (channel.parentId !== TICKET_CATEGORY_ID) {
-        return interaction.editReply({ content: 'This command can only be used in a ticket channel.', ephemeral: true });
-    }
-
-    const ticketData = await getTicket(channel.id);
-    if (!ticketData || ticketData.isClosed) {
-        return interaction.editReply({ content: 'This ticket is already closed or does not exist.', ephemeral: true });
-    }
-
-    // Staff or the original ticket creator can close
-    if (!interaction.member.roles.cache.has(STAFF_ROLE_ID) && interaction.user.id !== ticketData.userId) {
-        return interaction.editReply({ content: 'You do not have permission to close this ticket.', ephemeral: true });
-    }
-
-    // 1. Clear any running unclaim timer
-    if (activeTimers.has(channel.id)) {
-        clearTimeout(activeTimers.get(channel.id));
-        activeTimers.delete(channel.id);
-    }
-
-    // 2. Save the transcript
-    const transcriptUrl = await saveTranscript(channel, ticketData);
-    
-    // 3. Mark as closed in Supabase DB
-    const updateResult = await setTicket(channel.id, { 
-        isClosed: true, 
-        closedAt: new Date().toISOString(),
-        closedBy: interaction.user.id,
-        transcriptUrl: transcriptUrl,
-    });
-
-    if (updateResult.error) {
-        await interaction.editReply({ content: 'Failed to update database (Ticket marked as closed). Channel will be deleted.', ephemeral: true });
-    } else {
-        await interaction.editReply({ content: 'Ticket closed and archived. Channel will be deleted shortly.', ephemeral: true });
-    }
-
-    // 4. Send log message
-    const logChannel = await channel.guild.channels.fetch(TICKET_LOG_CHANNEL_ID).catch(() => null);
-    if (logChannel) {
-        const logEmbed = new EmbedBuilder()
-            .setTitle(`🔒 Ticket Closed: #${channel.name}`)
-            .addFields(
-                { name: 'User', value: `<@${ticketData.userId}>`, inline: true },
-                { name: 'Closed By', value: `<@${interaction.user.id}>`, inline: true },
-                { name: 'Claimed By', value: ticketData.claimedBy ? `<@${ticketData.claimedBy}>` : 'Unclaimed', inline: true },
-                { name: 'Reason', value: reason || 'N/A', inline: false },
-                { name: 'Transcript Link', value: transcriptUrl || 'Failed to generate transcript.', inline: false }
-            )
-            .setColor(0x800080) // Purple for closure
+        const initialEmbed = new EmbedBuilder()
+            .setTitle(`New Ticket: ${ticketType}`)
+            .setDescription(`
+                Hello <@${user.id}>! A member of the <@&${STAFF_ROLE_ID}> team will be with you shortly.
+                ${details ? '\n---\n**Application Details:**\n' + details : ''}
+            `)
+            .setColor('#2ECC71') // Green
+            .setFooter({ text: `Ticket ID: ${channel.id}` })
             .setTimestamp();
-        await logChannel.send({ embeds: [logEmbed] });
+
+        const initialMessage = await channel.send({
+            content: `👋 <@${user.id}> | **<@&${STAFF_ROLE_ID}>** | @everyone`,
+            embeds: [initialEmbed],
+            components: [buttons]
+        });
+
+        // Pin the initial message
+        await initialMessage.pin();
+
+        await interaction.editReply({ content: `✅ Your **${ticketType}** ticket has been created! Go to ${channel.toString()}` });
+
+    } catch (error) {
+        console.error('Error creating ticket channel:', error);
+        await interaction.editReply({ content: 'An unexpected error occurred while creating your ticket. Please try again later.' });
     }
-
-    // 5. Delete channel after a short delay
-    setTimeout(() => {
-        channel.delete('Ticket closed and archived.').catch(e => console.error("Failed to delete channel:", e));
-    }, 5000); 
 }
-
-
-// --- 11. UTILITY FUNCTIONS ---
 
 /**
- * Sets a timer for 20 minutes to auto-unclaim a ticket if the staff member is inactive.
+ * Maps ticket type to its corresponding category ID.
+ * @param {string} ticketType - The ticket type string.
+ * @returns {string|null} The category ID.
  */
-function startUnclaimTimer(channelId, claimedBy) {
-    if (activeTimers.has(channelId)) {
-        clearTimeout(activeTimers.get(channelId));
+function getCategoryId(ticketType) {
+    switch (ticketType) {
+        case 'Apply for Media': return MEDIA_CATEGORY_ID;
+        case 'Report Exploiters': return REPORT_CATEGORY_ID;
+        case 'General Support': return SUPPORT_CATEGORY_ID;
+        default: return null;
     }
-    
-    const timer = setTimeout(async () => {
-        const ticketData = await getTicket(channelId);
-        if (!ticketData || ticketData.isClosed || ticketData.claimedBy !== claimedBy) {
-            // Check if it was claimed by someone else while the timer was running, or if closed.
-            activeTimers.delete(channelId);
-            return;
-        }
+}
 
-        const channel = await client.channels.fetch(channelId).catch(() => null);
-        if (!channel) {
-            activeTimers.delete(channelId);
-            return;
-        }
+/**
+ * Handles all staff button interactions (Claim, Close, Delete, Payout Approval).
+ * @param {ButtonInteraction} interaction
+ */
+async function handleButton(interaction) {
+    if (!interaction.inGuild()) return interaction.reply({ content: 'This action must be run in a server.', ephemeral: true });
 
-        // Action: Auto-unclaim the ticket
-        await setTicket(channelId, { claimedBy: null });
-        
-        await channel.send({
-            content: `<@&${STAFF_ROLE_ID}> **[AUTO-UNCLAIM]** The ticket was automatically unclaimed because <@${claimedBy}> was inactive for 20 minutes after the user's last reply. Please use \`/claim\` to assist.`,
-        });
+    // Check staff permissions for ticket action buttons
+    const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
+    const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
 
-        // Update the control message to show it's unclaimed
-        try {
-            const controlMessage = await channel.messages.fetch(ticketData.controlMessageId);
-            const embed = EmbedBuilder.from(controlMessage.embeds[0])
-                .setDescription(`Ticket is currently **unclaimed**.\nStaff: <@&${STAFF_ROLE_ID}>`)
-                .setColor(0xFF8C00) // Orange
-                .setFooter(null); // Clear timer footer
-            await controlMessage.edit({ embeds: [embed], components: [controlMessage.components[0]] });
-        } catch (e) {
-            console.error("Could not edit control message after auto-unclaim:", e);
-        }
+    const [action, ...args] = interaction.customId.split('_');
 
-        activeTimers.delete(channelId);
-        console.log(`[Timer] Ticket ${channelId} auto-unclaimed.`);
+    if (['claim', 'close', 'delete'].includes(action)) {
+        if (!isStaff) return interaction.reply({ content: 'You must be a staff member to perform this action.', ephemeral: true });
+        await interaction.deferReply({ ephemeral: true });
+    }
 
+    if (action === 'claim') {
+        return handleClaim(interaction);
+    } else if (action === 'close') {
+        return handleClose(interaction);
+    } else if (action === 'delete') {
+        if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can finalize and delete tickets.', ephemeral: true });
+        return handleDelete(interaction);
+    } else if (action === 'payout') {
+        // Payout approval buttons (payout_approve_STAFFID_AMOUNT or payout_deny_STAFFID_AMOUNT)
+        if (!isAdmin) return interaction.reply({ content: 'Only Administrators can approve or deny payout requests.', ephemeral: true });
+        return handlePayoutApproval(interaction, action, args);
+    }
+}
+
+// --- Claim/Unclaim Logic ---
+
+/**
+ * Sets up the unclaim timeout when the user messages in a claimed channel.
+ * @param {Message} message The user's message.
+ * @param {string} claimerId The ID of the claimed staff member.
+ */
+function startUnclaimTimer(message, claimerId) {
+    const channelId = message.channel.id;
+    const guild = message.guild;
+
+    // Clear any existing timeout
+    const existingTicket = claimedTickets.get(channelId);
+    if (existingTicket?.timeoutId) {
+        clearTimeout(existingTicket.timeoutId);
+    }
+
+    const timeoutId = setTimeout(async () => {
+        const ticketInfo = claimedTickets.get(channelId);
+        if (!ticketInfo || ticketInfo.claimerId !== claimerId) return; // Claim changed or was already unclaimed
+
+        await unclaimTicket(guild, channelId, true);
+        message.channel.send(`⚠️ <@${claimerId}> did not reply within 20 minutes of the user's message. The ticket has been **automatically unclaimed**. All staff can now respond.`);
     }, UNCLAIM_TIMEOUT_MS);
 
-    activeTimers.set(channelId, timer);
+    // Update global state
+    claimedTickets.set(channelId, { claimerId, timeoutId });
 }
 
 /**
- * Transcribes the channel messages and uploads the text to Supabase Storage.
+ * Unclaims a ticket, resetting permissions and database state.
+ * @param {Guild} guild The guild object.
+ * @param {string} channelId The channel ID to unclaim.
+ * @param {boolean} isTimeout If the unclaim was due to timeout.
  */
-async function saveTranscript(channel, ticketData) {
-    if (!supabase) return null;
+async function unclaimTicket(guild, channelId, isTimeout = false) {
+    const channel = guild.channels.cache.get(channelId);
+    if (!channel) return;
 
+    // 1. Clear timeout from global state
+    const ticketInfo = claimedTickets.get(channelId);
+    if (ticketInfo?.timeoutId) clearTimeout(ticketInfo.timeoutId);
+    claimedTickets.delete(channelId);
+
+    // 2. Reset Permissions (restore send permissions for @Staff)
     try {
-        // Fetch up to 200 messages (Discord limit is 100 per call, fetch twice if needed)
-        const messages = await channel.messages.fetch({ limit: 200 }); 
-        const transcriptLines = messages
-            .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-            .map(msg => `[${msg.createdAt.toISOString()}] ${msg.author.tag} (${msg.author.id}): ${msg.content}`)
-            .join('\n');
+        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, {
+            SendMessages: true,
+        });
 
-        const ticketType = ticketData.type.toUpperCase().replace(/_/g, ' ');
+        // 3. Update DB
+        await db.query(
+            'UPDATE ticket_logs SET is_claimed = FALSE, claimer_id = NULL WHERE channel_id = $1 AND end_time IS NULL',
+            [channelId]
+        );
 
-        const transcriptContent = 
-            `--- Transcript for ${ticketType} Ticket #${channel.name} (${channel.id}) ---\n` +
-            `User ID: ${ticketData.userId}\nClaimed By: ${ticketData.claimedBy || 'N/A'}\nClosed By: ${ticketData.closedBy}\n` +
-            `Closed At: ${new Date().toISOString()}\n\n` +
-            transcriptLines;
+        // 4. Update Channel Topic
+        await channel.setTopic(channel.topic.replace(/🔒 Claimed by: .*$/i, ''));
 
-        const fileName = `transcript/${channel.id}-${Date.now()}.txt`;
-        
-        const { error } = await supabase.storage
-            .from(STORAGE_BUCKET_NAME)
-            .upload(fileName, transcriptContent, {
-                contentType: 'text/plain',
-                cacheControl: '3600',
-                upsert: false
-            });
+    } catch (error) {
+        console.error(`Error during unclaim/permission reset for ${channelId}:`, error);
+    }
+}
 
-        if (error) {
-            console.error("[DB] Supabase Storage Upload Error:", error);
-            return null;
+client.on('messageCreate', async message => {
+    if (!message.inGuild() || message.author.bot) return;
+
+    const channelId = message.channel.id;
+    const ticketInfo = claimedTickets.get(channelId);
+
+    if (!ticketInfo) return; // Not a claimed ticket
+
+    const ticketLog = await db.query('SELECT creator_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
+    if (ticketLog.rows.length === 0) {
+        claimedTickets.delete(channelId); // Cleanup dead cache entry
+        return;
+    }
+
+    const creatorId = ticketLog.rows[0].creator_id;
+    const claimerId = ticketInfo.claimerId;
+
+    // Case 1: Message is from the TICKET CREATOR -> START UNCLAIM TIMER
+    if (message.author.id === creatorId) {
+        startUnclaimTimer(message, claimerId);
+    }
+
+    // Case 2: Message is from the CLAIMED STAFF -> RESET TIMER (if it exists)
+    if (message.author.id === claimerId) {
+        if (ticketInfo?.timeoutId) {
+            clearTimeout(ticketInfo.timeoutId);
+            claimedTickets.set(channelId, { claimerId: claimerId, timeoutId: null }); // Clear timeout flag
+        }
+    }
+});
+
+
+/**
+ * Handles the 'Claim' button press.
+ * @param {ButtonInteraction} interaction
+ */
+async function handleClaim(interaction) {
+    const channel = interaction.channel;
+    const claimerId = interaction.user.id;
+
+    const ticketCheck = await db.query('SELECT is_claimed, claimer_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channel.id]);
+
+    if (ticketCheck.rows.length === 0) {
+        return interaction.editReply({ content: 'This channel is not an active ticket.', ephemeral: true });
+    }
+
+    const { is_claimed, claimer_id } = ticketCheck.rows[0];
+
+    if (is_claimed) {
+        // Unclaim if it's the current claimer, otherwise reject
+        if (claimer_id === claimerId) {
+            await unclaimTicket(interaction.guild, channel.id, false);
+            return interaction.editReply({ content: '✅ You have **unclaimed** this ticket. All staff can now respond.', ephemeral: true });
+        } else {
+            return interaction.editReply({ content: `❌ This ticket is already claimed by <@${claimer_id}>.`, ephemeral: true });
+        }
+    }
+
+    // 1. Claim the ticket
+    await db.query(
+        'UPDATE ticket_logs SET is_claimed = TRUE, claimer_id = $1 WHERE channel_id = $2 AND end_time IS NULL',
+        [claimerId, channel.id]
+    );
+
+    // 2. Update Channel Topic & Permissions (Deny SendMessages for other staff)
+    await channel.setTopic(`🔒 Claimed by: ${interaction.user.tag} (${claimerId}) | Type: ${ticketCheck.rows[0].ticket_type}`);
+
+    // Deny typing permission for ALL staff *except* Admins and the Claimer
+    const staffRole = channel.guild.roles.cache.get(STAFF_ROLE_ID);
+    if (staffRole) {
+        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false });
+    }
+    // Grant back SendMessages to the claiming staff member (though they should have it from the initial deny)
+    await channel.permissionOverwrites.edit(claimerId, { SendMessages: true });
+
+    // 3. Update global state
+    claimedTickets.set(channel.id, { claimerId, timeoutId: null });
+
+    await interaction.editReply({ content: '✅ You have **claimed** this ticket. Other staff members cannot type here until you unclaim it.', ephemeral: true });
+    await channel.send(`🔒 <@${claimerId}> has **claimed** this ticket and is taking over.`);
+}
+
+
+// --- Lifecycle Handlers (Close/Delete) ---
+
+/**
+ * Handles the 'Close' button press (saves Robux, soft-closes).
+ * @param {ButtonInteraction} interaction
+ */
+async function handleClose(interaction) {
+    const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [interaction.channel.id]);
+
+    if (ticketLogResult.rows.length === 0) {
+        return interaction.editReply({ content: 'This channel is not an active ticket.', ephemeral: true });
+    }
+
+    const { creator_id, ticket_type, claimer_id } = ticketLogResult.rows[0];
+
+    if (claimer_id !== interaction.user.id) {
+        return interaction.editReply({ content: 'You must claim the ticket first to close it.', ephemeral: true });
+    }
+
+    const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
+
+    // 1. Unclaim just in case
+    await unclaimTicket(interaction.guild, interaction.channel.id);
+
+    // 2. Add Robux and Log Close
+    await db.query(
+        'UPDATE ticket_logs SET end_time = CURRENT_TIMESTAMP WHERE channel_id = $1',
+        [interaction.channel.id]
+    );
+    const newBalance = await updateRobuxBalance(interaction.user.id, robuxValue);
+
+    // 3. Update Message and Disable Buttons
+    const initialMessage = await interaction.channel.messages.fetch(interaction.message.id);
+    const disabledRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('claimed').setLabel('Claimed').setStyle(ButtonStyle.Primary).setDisabled(true).setEmoji('🔒'),
+        new ButtonBuilder().setCustomId('closed').setLabel('Closed').setStyle(ButtonStyle.Secondary).setDisabled(true).setEmoji('💾'),
+        new ButtonBuilder().setCustomId('deleted').setLabel('Deleted').setStyle(ButtonStyle.Danger).setDisabled(true).setEmoji('❌'),
+    );
+
+    await initialMessage.edit({
+        content: `**Ticket Closed by ${interaction.user.tag}** | Finalized.`,
+        components: [disabledRow]
+    });
+
+    // 4. Send confirmation
+    await interaction.editReply({
+        content: `✅ Ticket closed. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). The channel is now locked.`,
+        ephemeral: true
+    });
+
+    // Lock permissions (deny creator and staff send access)
+    await interaction.channel.permissionOverwrites.edit(creator_id, { SendMessages: false });
+    await interaction.channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false });
+}
+
+/**
+ * Handles the 'Delete' button press (saves Robux, generates transcript, deletes channel).
+ * @param {ButtonInteraction} interaction
+ */
+async function handleDelete(interaction) {
+    const channel = interaction.channel;
+    const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channel.id]);
+
+    if (ticketLogResult.rows.length === 0) {
+        return interaction.editReply({ content: 'This channel is not an active ticket.', ephemeral: true });
+    }
+
+    const { creator_id, ticket_type, claimer_id } = ticketLogResult.rows[0];
+
+    // Must be claimed by current user, or just an admin finalizing it if it's already closed.
+    if (!claimer_id || claimer_id !== interaction.user.id) {
+        return interaction.editReply({ content: 'You must claim the ticket first to delete it.', ephemeral: true });
+    }
+
+    const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
+    const creator = await interaction.guild.members.fetch(creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
+
+    // 1. Unclaim just in case
+    await unclaimTicket(interaction.guild, interaction.channel.id);
+
+    // 2. Fetch all messages for transcript
+    const messages = await channel.messages.fetch({ limit: 100 });
+    const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    const htmlContent = generateHtmlTranscript(sortedMessages, creator);
+
+    const logChannel = client.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID);
+    if (!logChannel) {
+        await interaction.editReply({ content: '❌ Transcript log channel not found. Deleting ticket without logging.' });
+    } else {
+        // 3. Upload Transcript
+        const attachment = new AttachmentBuilder(Buffer.from(htmlContent), { name: `transcript-${channel.name}-${Date.now()}.html` });
+        const logMessage = await logChannel.send({
+            content: `**TICKET DELETED & LOGGED**\nCreator: <@${creator_id}> (${creator.user.tag})\nType: ${ticket_type}\nStaff Finalizer: <@${interaction.user.id}>`,
+            files: [attachment]
+        });
+
+        // 4. Extract Hosted Link (Discord provides direct CDN link upon upload)
+        const transcriptUrl = logMessage.attachments.first()?.url || 'URL not available.';
+
+        // Add Direct Link Button
+        const linkRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setLabel('Direct Link')
+                .setStyle(ButtonStyle.Link)
+                .setURL(transcriptUrl)
+        );
+
+        await logMessage.edit({ components: [linkRow] });
+
+        // 5. Update DB and Add Robux
+        await db.query(
+            'UPDATE ticket_logs SET end_time = CURRENT_TIMESTAMP, html_transcript_link = $2 WHERE channel_id = $1',
+            [channel.id, transcriptUrl]
+        );
+        const newBalance = await updateRobuxBalance(interaction.user.id, robuxValue);
+
+        await interaction.editReply({
+            content: `✅ Ticket deleted. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). Transcript saved. Channel will be deleted in 5 seconds.`,
+            ephemeral: true
+        });
+    }
+
+    // 6. Delete Channel
+    setTimeout(() => {
+        channel.delete('Ticket finalized and deleted by staff.').catch(err => console.error('Error deleting channel:', err));
+    }, 5000);
+}
+
+
+// --- Payout Approval Logic ---
+
+/**
+ * Handles the approval or denial of a Robux payout request.
+ * @param {ButtonInteraction} interaction
+ * @param {string} action 'payout_approve' or 'payout_deny'.
+ * @param {string[]} args Array containing [staffId, amount].
+ */
+async function handlePayoutApproval(interaction, action, args) {
+    await interaction.deferReply({ ephemeral: true });
+
+    const [staffId, amountStr] = args;
+    const amount = parseInt(amountStr);
+    const approverId = interaction.user.id;
+    const isApproval = action === 'payout_approve';
+
+    // Disable buttons immediately to prevent double-processing
+    const disabledRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('approved').setLabel(isApproval ? '✅ Approved' : '❌ Denied').setStyle(isApproval ? ButtonStyle.Success : ButtonStyle.Danger).setDisabled(true)
+    );
+    await interaction.message.edit({ components: [disabledRow] });
+
+    if (!isApproval) {
+        // Denial: Just update the message and notify the staff
+        try {
+            const staffMember = await client.users.fetch(staffId);
+            await staffMember.send(`❌ Your Robux payout request for **${amount} R$** has been **denied** by <@${approverId}>. Please contact them for details.`);
+            return interaction.editReply({ content: `❌ Successfully denied payout request for <@${staffId}>.` });
+        } catch (error) {
+            console.error('Error denying payout:', error);
+            return interaction.editReply({ content: `❌ Denied, but could not DM staff member <@${staffId}>.` });
+        }
+    }
+
+    // Approval Logic
+    try {
+        // 1. Get staff's current balance again (for double check)
+        const balanceResult = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [staffId]);
+        const currentBalance = balanceResult.rows.length > 0 ? balanceResult.rows[0].robux_balance : 0;
+
+        if (currentBalance < amount) {
+            return interaction.editReply({ content: `⚠️ Cannot approve. Staff member's balance (**${currentBalance} R$**) is now less than the requested amount (**${amount} R$**). Request rejected.` });
         }
 
-        const { data: publicUrlData } = supabase.storage
-            .from(STORAGE_BUCKET_NAME)
-            .getPublicUrl(fileName);
+        // 2. Reset Balance and Log Transaction (using negative amount in updateRobuxBalance)
+        await updateRobuxBalance(staffId, -amount);
 
-        return publicUrlData.publicUrl;
+        // 3. Log the successful transaction
+        const gamepassLink = interaction.message.embeds[0].fields.find(f => f.name === 'Gamepass Link')?.value || 'N/A';
 
-    } catch (e) {
-        console.error("[DB] RUNTIME ERROR during transcript saving:", e);
-        return null;
-    }
-}
+        await db.query(
+            'INSERT INTO transaction_logs (staff_id, amount_paid, gamepass_link, admin_approver_id) VALUES ($1, $2, $3, $4)',
+            [staffId, amount, gamepassLink, approverId]
+        );
 
-/**
- * Registers global slash commands.
- */
-async function registerSlashCommands() {
-    const commands = [];
-    client.commands.forEach(command => commands.push(command.data.toJSON()));
+        // 4. Notify Staff Member
+        const staffMember = await client.users.fetch(staffId);
+        await staffMember.send(
+            `✅ Your Robux payout request for **${amount} R$** has been **approved** by <@${approverId}>! Your balance has been reset to **0 R$**.\n\nPlease ensure your **Roblox Gamepass** is correctly configured to receive the payment shortly.`
+        );
 
-    try {
-        const guild = await client.guilds.fetch(GUILD_ID);
-        await guild.commands.set(commands);
-        console.log(`Slash commands registered successfully to guild ${GUILD_ID}.`);
+        // 5. Final Confirmation
+        await interaction.editReply({ content: `✅ Payout of **${amount} R$** to <@${staffId}> approved and logged. Staff notified. Balance reset to 0.` });
+
     } catch (error) {
-        console.error('Failed to register slash commands. Check GUILD_ID and bot permissions:', error);
+        console.error('Error during payout approval:', error);
+        await updateRobuxBalance(staffId, amount); // CRITICAL: Rollback balance if transaction fails
+        await interaction.editReply({ content: '❌ A critical error occurred during approval and transaction logging. Balance has been potentially rolled back. Check logs immediately.' });
     }
 }
 
-// --- 12. START BOT ---
-client.login(TOKEN).catch(e => console.error("FATAL ERROR: Failed to log in to Discord. Check DISCORD_TOKEN:", e));
+// Start the bot
+client.login(DISCORD_TOKEN);

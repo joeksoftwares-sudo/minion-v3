@@ -1,14 +1,13 @@
 {
-  "name": "discord-ticket-bot",
+  "name": "railway-discord-ticket-system",
   "version": "1.0.0",
-  "description": "Discord Bot for managing tickets and staff payouts.",
+  "description": "A high-quality, automated Discord ticket system with PostgreSQL and Robux tracking.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "discord.js": "^14.15.3",
-    "@supabase/supabase-js": "^2.43.4",
-    "uuid": "^9.0.1"
+    "pg": "^8.12.0"
   }
 }
