@@ -320,80 +320,89 @@ async function handleSlashCommand(interaction) {
     const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
     const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
 
-    switch (interaction.commandName) {
-        case 'panel':
-            if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to set up the panel.', ephemeral: true });
-            const { embed, row } = createTicketPanel();
-            await interaction.channel.send({ embeds: [embed], components: [row] });
-            await interaction.reply({ content: 'Ticket panel deployed successfully.', ephemeral: true });
-            break;
+    try {
+        switch (interaction.commandName) {
+            case 'panel':
+                if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to set up the panel.', ephemeral: true });
+                const { embed, row } = createTicketPanel();
+                await interaction.channel.send({ embeds: [embed], components: [row] });
+                await interaction.reply({ content: 'Ticket panel deployed successfully.', ephemeral: true });
+                break;
 
-        case 'check-robux':
-            if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
-            
-            try {
-                // --- IN-MEMORY BALANCE CHECK ---
-                const data = staffData.get(interaction.user.id);
-                const balance = data ? data.robux_balance : 0;
-                // -------------------------------
+            case 'check-robux':
+                if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
+                
+                try {
+                    // --- IN-MEMORY BALANCE CHECK ---
+                    const data = staffData.get(interaction.user.id);
+                    const balance = data ? data.robux_balance : 0;
+                    // -------------------------------
 
-                const embed = new EmbedBuilder()
-                    .setTitle('💰 Robux Payout Balance')
-                    .setColor('#FFC0CB')
-                    .setDescription(`
-                        Your current earned balance is **${balance} R$**.
-                        ---
-                        **Payout Rules:**
-                        - **Min Request:** ${PAYOUT_MIN} R$
-                        - **Max Request:** ${PAYOUT_MAX} R$
-                        - Use \`/payout\` when you are ready to request a payment.
-                    `);
-                await interaction.reply({ embeds: [embed], ephemeral: true });
-            } catch (error) {
-                console.error('Error checking balance:', error);
-                await interaction.reply({ content: 'An error occurred while fetching your balance.', ephemeral: true });
-            }
-            break;
+                    const embed = new EmbedBuilder()
+                        .setTitle('💰 Robux Payout Balance')
+                        .setColor('#FFC0CB')
+                        .setDescription(`
+                            Your current earned balance is **${balance} R$**.
+                            ---
+                            **Payout Rules:**
+                            - **Min Request:** ${PAYOUT_MIN} R$
+                            - **Max Request:** ${PAYOUT_MAX} R$
+                            - Use \`/payout\` when you are ready to request a payment.
+                        `);
+                    await interaction.reply({ embeds: [embed], ephemeral: true });
+                } catch (error) {
+                    console.error('Error checking balance:', error);
+                    await interaction.reply({ content: 'An error occurred while fetching your balance.', ephemeral: true });
+                }
+                break;
 
-        case 'payout':
-            if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
-            
-            const modal = new ModalBuilder()
-                .setCustomId('payout_modal')
-                .setTitle('Robux Payout Request');
+            case 'payout':
+                if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
+                
+                const modal = new ModalBuilder()
+                    .setCustomId('payout_modal')
+                    .setTitle('Robux Payout Request');
 
-            const amountInput = new TextInputBuilder()
-                .setCustomId('payout_amount')
-                .setLabel('Requested Robux Amount (R$)')
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder(`Between ${PAYOUT_MIN} and ${PAYOUT_MAX}`)
-                .setRequired(true);
+                const amountInput = new TextInputBuilder()
+                    .setCustomId('payout_amount')
+                    .setLabel('Requested Robux Amount (R$)')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder(`Between ${PAYOUT_MIN} and ${PAYOUT_MAX}`)
+                    .setRequired(true);
 
-            const gamepassInput = new TextInputBuilder()
-                .setCustomId('gamepass_link')
-                .setLabel('Roblox Gamepass Link')
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder('https://www.roblox.com/game-pass/...')
-                .setRequired(true);
+                const gamepassInput = new TextInputBuilder()
+                    .setCustomId('gamepass_link')
+                    .setLabel('Roblox Gamepass Link')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('https://www.roblox.com/game-pass/...')
+                    .setRequired(true);
 
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(amountInput),
-                new ActionRowBuilder().addComponents(gamepassInput)
-            );
-            await interaction.showModal(modal);
-            break;
-            
-        case 'close-ticket':
-            if (!isStaff) return interaction.reply({ content: 'You must be staff to use this command.', ephemeral: true });
-            await interaction.deferReply({ ephemeral: true });
-            await handleSoftCloseLogic(interaction, interaction.channel.id, interaction.user.id, true);
-            break;
-            
-        case 'delete-ticket':
-            if (!isAdmin) return interaction.reply({ content: 'You must be an admin to use this command.', ephemeral: true });
-            await interaction.deferReply({ ephemeral: true });
-            await handleDeleteLogic(interaction, interaction.channel.id, interaction.user.id, true);
-            break;
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(amountInput),
+                    new ActionRowBuilder().addComponents(gamepassInput)
+                );
+                await interaction.showModal(modal);
+                break;
+                
+            case 'close-ticket':
+                if (!isStaff) return interaction.reply({ content: 'You must be staff to use this command.', ephemeral: true });
+                await interaction.deferReply({ ephemeral: true });
+                await handleSoftCloseLogic(interaction, interaction.channel.id, interaction.user.id, true);
+                break;
+                
+            case 'delete-ticket':
+                if (!isAdmin) return interaction.reply({ content: 'You must be an admin to use this command.', ephemeral: true });
+                await interaction.deferReply({ ephemeral: true });
+                await handleDeleteLogic(interaction, interaction.channel.id, interaction.user.id, true);
+                break;
+        }
+    } catch (error) {
+        console.error(`Error processing slash command /${interaction.commandName}:`, error);
+        if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ content: '❌ An unexpected internal error prevented this command. Check the bot logs for details.', ephemeral: true });
+        } else {
+             await interaction.editReply({ content: '❌ An unexpected internal error prevented this command. Check the bot logs for details.', ephemeral: true });
+        }
     }
 }
 
@@ -404,46 +413,51 @@ async function handleSlashCommand(interaction) {
 async function handleSelectMenu(interaction) {
     if (interaction.customId !== 'select_ticket_type') return;
 
-    const ticketType = interaction.values[0];
+    try {
+        const ticketType = interaction.values[0];
 
-    // 1. Show Modal for Media Applications
-    if (ticketType === 'Apply for Media') {
-        const modal = new ModalBuilder()
-            .setCustomId('media_application_modal')
-            .setTitle('Media Application Form');
+        // 1. Show Modal for Media Applications
+        if (ticketType === 'Apply for Media') {
+            const modal = new ModalBuilder()
+                .setCustomId('media_application_modal')
+                .setTitle('Media Application Form');
 
-        const linkInput = new TextInputBuilder()
-            .setCustomId('platform_link')
-            .setLabel('Link to main content platform (YT, TikTok, etc.)')
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder('e.g., youtube.com/@YourChannel')
-            .setRequired(true);
+            const linkInput = new TextInputBuilder()
+                .setCustomId('platform_link')
+                .setLabel('Link to main content platform (YT, TikTok, etc.)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('e.g., youtube.com/@YourChannel')
+                .setRequired(true);
 
-        const countInput = new TextInputBuilder()
-            .setCustomId('follower_count')
-            .setLabel('Current follower/subscriber count (Number only)')
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder('e.g., 5000')
-            .setRequired(true);
+            const countInput = new TextInputBuilder()
+                .setCustomId('follower_count')
+                .setLabel('Current follower/subscriber count (Number only)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('e.g., 5000')
+                .setRequired(true);
 
-        const planInput = new TextInputBuilder()
-            .setCustomId('content_plan')
-            .setLabel('Content plan for the server (Detailed description)')
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(true);
+            const planInput = new TextInputBuilder()
+                .setCustomId('content_plan')
+                .setLabel('Content plan for the server (Detailed description)')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true);
 
-        modal.addComponents(
-            new ActionRowBuilder().addComponents(linkInput),
-            new ActionRowBuilder().addComponents(countInput),
-            new ActionRowBuilder().addComponents(planInput)
-        );
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(linkInput),
+                new ActionRowBuilder().addComponents(countInput),
+                new ActionRowBuilder().addComponents(planInput)
+            );
 
-        return interaction.showModal(modal);
+            return interaction.showModal(modal);
+        }
+
+        // 2. Direct Channel Creation for other types
+        await interaction.deferReply({ ephemeral: true });
+        await createTicketChannel(interaction, ticketType);
+    } catch (error) {
+        console.error('Error processing select menu interaction:', error);
+        await interaction.editReply({ content: '❌ An unexpected internal error occurred while creating the ticket. Check the bot logs for details.', ephemeral: true });
     }
-
-    // 2. Direct Channel Creation for other types
-    await interaction.deferReply({ ephemeral: true });
-    await createTicketChannel(interaction, ticketType);
 }
 
 /**
@@ -451,21 +465,26 @@ async function handleSelectMenu(interaction) {
  * @param {ModalSubmitInteraction} interaction
  */
 async function handleModalSubmit(interaction) {
-    if (interaction.customId === 'media_application_modal') {
-        await interaction.deferReply({ ephemeral: true });
-        const link = interaction.fields.getTextInputValue('platform_link');
-        const count = interaction.fields.getTextInputValue('follower_count');
-        const plan = interaction.fields.getTextInputValue('content_plan');
+    try {
+        if (interaction.customId === 'media_application_modal') {
+            await interaction.deferReply({ ephemeral: true });
+            const link = interaction.fields.getTextInputValue('platform_link');
+            const count = interaction.fields.getTextInputValue('follower_count');
+            const plan = interaction.fields.getTextInputValue('content_plan');
 
-        const details = `
-            **Platform Link:** ${link}
-            **Follower/Subscriber Count:** ${count}
-            **Content Plan:**\n${plan}
-        `;
+            const details = `
+                **Platform Link:** ${link}
+                **Follower/Subscriber Count:** ${count}
+                **Content Plan:**\n${plan}
+            `;
 
-        await createTicketChannel(interaction, 'Apply for Media', details);
-    } else if (interaction.customId === 'payout_modal') {
-        await handlePayoutRequest(interaction);
+            await createTicketChannel(interaction, 'Apply for Media', details);
+        } else if (interaction.customId === 'payout_modal') {
+            await handlePayoutRequest(interaction);
+        }
+    } catch (error) {
+         console.error('Error processing modal submission:', error);
+        await interaction.editReply({ content: '❌ An unexpected internal error occurred during form submission. Check the bot logs for details.', ephemeral: true });
     }
 }
 
@@ -476,19 +495,19 @@ async function handleModalSubmit(interaction) {
  */
 async function handlePayoutRequest(interaction) {
     await interaction.deferReply({ ephemeral: true });
-    const amountStr = interaction.fields.getTextInputValue('payout_amount');
-    const gamepassLink = interaction.fields.getTextInputValue('gamepass_link');
-    const staffId = interaction.user.id;
-
-    const amount = parseInt(amountStr);
-
-    if (isNaN(amount) || amount < PAYOUT_MIN || amount > PAYOUT_MAX) {
-        return interaction.editReply({
-            content: `❌ Invalid amount. You must request between ${PAYOUT_MIN} R$ and ${PAYOUT_MAX} R$.`
-        });
-    }
-
     try {
+        const amountStr = interaction.fields.getTextInputValue('payout_amount');
+        const gamepassLink = interaction.fields.getTextInputValue('gamepass_link');
+        const staffId = interaction.user.id;
+
+        const amount = parseInt(amountStr);
+
+        if (isNaN(amount) || amount < PAYOUT_MIN || amount > PAYOUT_MAX) {
+            return interaction.editReply({
+                content: `❌ Invalid amount. You must request between ${PAYOUT_MIN} R$ and ${PAYOUT_MAX} R$.`
+            });
+        }
+
         // --- IN-MEMORY BALANCE CHECK ---
         const balanceData = staffData.get(staffId);
         const currentBalance = balanceData ? balanceData.robux_balance : 0;
@@ -501,7 +520,10 @@ async function handlePayoutRequest(interaction) {
         }
 
         const approvalChannel = client.channels.cache.get(ADMIN_APPROVAL_CHANNEL_ID);
-        if (!approvalChannel) return interaction.editReply({ content: 'An internal error occurred: Approval channel not found.' });
+        if (!approvalChannel) {
+             console.error(`ADMIN_APPROVAL_CHANNEL_ID: ${ADMIN_APPROVAL_CHANNEL_ID} not found.`);
+             return interaction.editReply({ content: 'An internal error occurred: Approval channel not found. Check ADMIN_APPROVAL_CHANNEL_ID in your environment variables.' });
+        }
 
         const approvalEmbed = new EmbedBuilder()
             .setTitle('💵 NEW ROBux PAYOUT REQUEST')
@@ -537,7 +559,7 @@ async function handlePayoutRequest(interaction) {
 
     } catch (error) {
         console.error('Error handling payout request:', error);
-        await interaction.editReply({ content: 'An error occurred during the payout request process.' });
+        await interaction.editReply({ content: 'An unexpected internal error occurred during the payout request process. Check the bot logs for details.' });
     }
 }
 
@@ -569,7 +591,8 @@ async function createTicketChannel(interaction, ticketType, details = '') {
         const ticketCategory = getCategoryId(ticketType);
 
         if (!ticketCategory) {
-            return interaction.editReply({ content: 'Ticket category not configured. Please contact an admin.', ephemeral: true });
+             console.error(`Ticket category ID not found for type: ${ticketType}. Check environment variables.`);
+             return interaction.editReply({ content: 'Ticket category not configured. Please contact an admin.', ephemeral: true });
         }
 
         // --- IN-MEMORY OPEN TICKET CHECK ---
@@ -634,7 +657,12 @@ async function createTicketChannel(interaction, ticketType, details = '') {
 
     } catch (error) {
         console.error('Error creating ticket channel:', error);
-        await interaction.editReply({ content: 'An unexpected error occurred while creating your ticket. Please try again later.' });
+        // Check if error is due to missing permissions for channel creation
+        if (error.code === 50013) {
+             await interaction.editReply({ content: '❌ The bot is missing permissions to **create channels** or **set up permissions** in the server. Please check the bot\'s role permissions.', ephemeral: true });
+        } else {
+             await interaction.editReply({ content: '❌ An unexpected error occurred while creating your ticket. Check the bot logs for details.', ephemeral: true });
+        }
     }
 }
 
@@ -652,55 +680,65 @@ async function handleButton(interaction) {
     const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
 
     const customId = interaction.customId;
+    
+    // Defer the reply immediately to prevent the 3-second "Interaction Failed" error
+    await interaction.deferReply({ ephemeral: true }).catch(e => console.error("Failed to defer reply:", e));
 
-    if (customId.startsWith('ticket_')) {
-        if (!isStaff) return interaction.reply({ content: 'You must be a staff member to perform ticket actions.', ephemeral: true });
-        await interaction.deferReply({ ephemeral: true });
+    try {
+        if (customId.startsWith('ticket_')) {
+            if (!isStaff) return interaction.editReply({ content: 'You must be a staff member to perform ticket actions.', ephemeral: true });
 
-        const channelId = interaction.channel.id;
-        const staffId = interaction.user.id;
+            const channelId = interaction.channel.id;
+            const staffId = interaction.user.id;
 
-        // --- IN-MEMORY TICKET LOG CHECK ---
-        const ticketLog = getActiveTicketLog(channelId);
-        
-        // Allow ticket_admin_delete to run even if the ticket log is not found (for cleaning up old channels)
-        if (!ticketLog && customId !== 'ticket_admin_delete') {
-            return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', ephemeral: true });
-        }
-        
-        const { claimer_id, is_claimed, is_soft_closed } = ticketLog || {};
-        const isCurrentClaimer = claimer_id === staffId;
-
-
-        switch (customId) {
-            case 'ticket_claim':
-            case 'ticket_unclaim':
-                if (is_soft_closed) return interaction.editReply({ content: 'Cannot change claim status on a soft-closed ticket.', ephemeral: true });
-                await handleClaimUnclaimLogic(interaction, channelId, staffId, is_claimed, isCurrentClaimer, claimer_id);
-                break;
-
-            case 'ticket_soft_close':
-                if (!isCurrentClaimer && is_claimed) {
-                    return interaction.editReply({ content: `❌ This ticket is claimed by <@${claimer_id}>. You must unclaim it or be the claimer to soft-close.`, ephemeral: true });
-                }
-                await handleSoftCloseLogic(interaction, channelId, staffId, false);
-                break;
-
-            case 'ticket_admin_delete':
-                if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can force delete tickets.', ephemeral: true });
-                await handleDeleteLogic(interaction, channelId, staffId, false);
-                break;
+            // --- IN-MEMORY TICKET LOG CHECK ---
+            const ticketLog = getActiveTicketLog(channelId);
             
-            case 'ticket_finalize_delete':
-                if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can finalize and delete tickets.', ephemeral: true });
-                await handleDeleteLogic(interaction, channelId, staffId, false);
-                break;
+            // Allow ticket_admin_delete to run even if the ticket log is not found (for cleaning up old channels)
+            if (!ticketLog && customId !== 'ticket_admin_delete') {
+                return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', ephemeral: true });
+            }
+            
+            const { claimer_id, is_claimed, is_soft_closed } = ticketLog || {};
+            const isCurrentClaimer = claimer_id === staffId;
+
+
+            switch (customId) {
+                case 'ticket_claim':
+                case 'ticket_unclaim':
+                    if (is_soft_closed) return interaction.editReply({ content: 'Cannot change claim status on a soft-closed ticket.', ephemeral: true });
+                    await handleClaimUnclaimLogic(interaction, channelId, staffId, is_claimed, isCurrentClaimer, claimer_id);
+                    break;
+
+                case 'ticket_soft_close':
+                    if (!isCurrentClaimer && is_claimed) {
+                        return interaction.editReply({ content: `❌ This ticket is claimed by <@${claimer_id}>. You must unclaim it or be the claimer to soft-close.`, ephemeral: true });
+                    }
+                    await handleSoftCloseLogic(interaction, channelId, staffId, false);
+                    break;
+
+                case 'ticket_admin_delete':
+                    if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can force delete tickets.', ephemeral: true });
+                    await handleDeleteLogic(interaction, channelId, staffId, false);
+                    break;
+                
+                case 'ticket_finalize_delete':
+                    if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can finalize and delete tickets.', ephemeral: true });
+                    await handleDeleteLogic(interaction, channelId, staffId, false);
+                    break;
+            }
+        } else if (customId.startsWith('payout_')) {
+            if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can approve or deny payout requests.', ephemeral: true });
+            const [action, , staffId, amountStr] = customId.split('_');
+            const args = [staffId, amountStr];
+            await handlePayoutApproval(interaction, action, args);
         }
-    } else if (customId.startsWith('payout_')) {
-        if (!isAdmin) return interaction.reply({ content: 'Only Administrators can approve or deny payout requests.', ephemeral: true });
-        const [action, , staffId, amountStr] = customId.split('_');
-        const args = [staffId, amountStr];
-        await handlePayoutApproval(interaction, action, args);
+    } catch (error) {
+        console.error(`❌ CRITICAL ERROR IN BUTTON HANDLER (${customId}) for channel ${interaction.channel.id}:`, error);
+        await interaction.editReply({ 
+            content: `❌ A critical error occurred during this action. Please check the bot's console logs immediately. Error: \`${error.message}\``, 
+            ephemeral: true 
+        }).catch(() => console.error("Failed to send error reply to user."));
     }
 }
 
@@ -721,11 +759,15 @@ function startUnclaimTimer(message, claimerId) {
     }
 
     const timeoutId = setTimeout(async () => {
-        const ticketInfo = claimedTickets.get(channelId);
-        if (!ticketInfo || ticketInfo.claimerId !== claimerId) return; 
+        try {
+            const ticketInfo = claimedTickets.get(channelId);
+            if (!ticketInfo || ticketInfo.claimerId !== claimerId) return; 
 
-        await unclaimTicket(guild, channelId, message.id);
-        message.channel.send(`⚠️ <@${claimerId}> did not reply within 20 minutes of the user's message. The ticket has been **automatically unclaimed**. All staff can now respond.`);
+            await unclaimTicket(guild, channelId, message.id);
+            message.channel.send(`⚠️ <@${claimerId}> did not reply within 20 minutes of the user's message. The ticket has been **automatically unclaimed**. All staff can now respond.`);
+        } catch (error) {
+            console.error(`Error in startUnclaimTimer timeout for channel ${channelId}:`, error);
+        }
     }, UNCLAIM_TIMEOUT_MS);
 
     // Update global state
@@ -785,7 +827,12 @@ async function unclaimTicket(guild, channelId, initialMessageId) {
 
     // 2. Reset Permissions (restore send permissions for @Staff)
     try {
-        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: true });
+        // Ensure STAFF_ROLE_ID is valid before trying to edit permissions
+        if (STAFF_ROLE_ID) {
+            await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: true });
+        } else {
+            console.error('STAFF_ROLE_ID is undefined or null. Cannot reset permissions.');
+        }
 
         // 3. Update In-Memory Ticket Log
         const log = getActiveTicketLog(channelId);
@@ -807,6 +854,7 @@ async function unclaimTicket(guild, channelId, initialMessageId) {
 
     } catch (error) {
         console.error(`Error during unclaim/permission reset for ${channelId}:`, error);
+        // Do not return here, we want to finish the unclaim process even if permission edit fails.
     }
 }
 
@@ -824,7 +872,8 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
     if (isClaimed) {
         // UNCLAIM LOGIC
         if (isCurrentClaimer) {
-            await unclaimTicket(interaction.guild, channelId, interaction.message.id);
+            const initialMessageId = interaction.message.id;
+            await unclaimTicket(interaction.guild, channelId, initialMessageId);
             await interaction.editReply({ content: '✅ You have **unclaimed** this ticket. All staff can now respond.', ephemeral: true });
             await channel.send(`🔓 <@${staffId}> has **unclaimed** this ticket. It is now available for any staff member.`);
         } else {
@@ -832,29 +881,51 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
         }
     } else {
         // CLAIM LOGIC
-        // 1. Claim the ticket (Update In-Memory Log)
-        log.is_claimed = true;
-        log.claimer_id = staffId;
-        ticketLogs.set(channelId, log);
+        try {
+            // 1. Claim the ticket (Update In-Memory Log)
+            log.is_claimed = true;
+            log.claimer_id = staffId;
+            ticketLogs.set(channelId, log);
 
-        // 2. Update Channel Topic & Permissions (Deny SendMessages for other staff)
-        await channel.setTopic(`🔒 Claimed by: ${interaction.user.tag} (${staffId})`);
-        
-        // Deny send messages permission for the general staff role
-        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false }); 
-        
-        // Explicitly allow send messages for the claiming staff member
-        await channel.permissionOverwrites.edit(staffId, { SendMessages: true });
+            // 2. Update Channel Topic & Permissions (Deny SendMessages for other staff)
+            await channel.setTopic(`🔒 Claimed by: ${interaction.user.tag} (${staffId})`);
+            
+            // Check for valid STAFF_ROLE_ID before setting permission overwrites
+            if (STAFF_ROLE_ID) {
+                // Deny send messages permission for the general staff role
+                await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false }); 
+            } else {
+                console.error('STAFF_ROLE_ID is undefined. Cannot deny send permissions for general staff role.');
+            }
+            
+            // Explicitly allow send messages for the claiming staff member
+            await channel.permissionOverwrites.edit(staffId, { SendMessages: true });
 
-        // 3. Update global state (no timeout yet)
-        claimedTickets.set(channelId, { claimerId: staffId, timeoutId: null });
-        
-        // 4. Update Buttons (Claim -> Unclaim)
-        const newRow = getTicketActionRow(true, log.is_soft_closed); // isClaimed: true
-        await interaction.message.edit({ components: [newRow] });
+            // 3. Update global state (no timeout yet)
+            claimedTickets.set(channelId, { claimerId: staffId, timeoutId: null });
+            
+            // 4. Update Buttons (Claim -> Unclaim)
+            const newRow = getTicketActionRow(true, log.is_soft_closed); // isClaimed: true
+            await interaction.message.edit({ components: [newRow] });
 
-        await interaction.editReply({ content: '✅ You have **claimed** this ticket. Other staff members cannot type here until you unclaim it.', ephemeral: true });
-        await channel.send(`🔒 <@${staffId}> has **claimed** this ticket and is taking over.`);
+            await interaction.editReply({ content: '✅ You have **claimed** this ticket. Other staff members cannot type here until you unclaim it.', ephemeral: true });
+            await channel.send(`🔒 <@${staffId}> has **claimed** this ticket and is taking over.`);
+        } catch (error) {
+            console.error('Error during Claim logic:', error);
+            // Rollback in-memory state on critical failure
+            log.is_claimed = false;
+            log.claimer_id = null;
+            ticketLogs.set(channelId, log);
+            
+            // Check if the error is a permission issue
+            if (error.code === 50013) {
+                return interaction.editReply({ 
+                    content: '❌ Claim Failed: The bot is missing permissions to **edit channel permissions** (Manage Roles) or **edit the initial ticket message**.', 
+                    ephemeral: true 
+                });
+            }
+            throw error; // Re-throw to be caught by the general handler
+        }
     }
 }
 
@@ -876,51 +947,75 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
         return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', ephemeral: true });
     }
 
-    const { creator_id, ticket_type, claimer_id, is_soft_closed } = log;
+    const { creator_id, ticket_type, is_soft_closed } = log;
 
     if (is_soft_closed) {
         return interaction.editReply({ content: 'This ticket is already soft-closed. Use the **Finalize & Delete** button to complete the process.', ephemeral: true });
     }
-
-    // 1. Unclaim just in case and remove from cache
-    if (claimedTickets.has(channelId)) {
-        const initialMessageId = interaction.message ? interaction.message.id : (await interaction.channel.messages.fetchPinned()).first()?.id;
-        if (initialMessageId) {
-            await unclaimTicket(interaction.guild, channelId, initialMessageId);
+    
+    try {
+        // 1. Unclaim just in case and remove from cache
+        if (claimedTickets.has(channelId)) {
+            const initialMessageId = interaction.message ? interaction.message.id : (await interaction.channel.messages.fetchPinned()).first()?.id;
+            if (initialMessageId) {
+                await unclaimTicket(interaction.guild, channelId, initialMessageId);
+            }
         }
-    }
-    
-    const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
+        
+        const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
 
-    // 2. Add Robux and Log Close (Update In-Memory Log)
-    log.is_soft_closed = true;
-    ticketLogs.set(channelId, log); // Store updated log
+        // 2. Add Robux and Log Close (Update In-Memory Log)
+        log.is_soft_closed = true;
+        ticketLogs.set(channelId, log); // Store updated log
 
-    const newBalance = updateRobuxBalance(staffId, robuxValue);
+        const newBalance = updateRobuxBalance(staffId, robuxValue);
 
-    // 3. Update Buttons (Close -> Finalize & Delete)
-    const initialMessage = interaction.message || (await interaction.channel.messages.fetchPinned()).first();
+        // 3. Update Buttons (Close -> Finalize & Delete)
+        const initialMessage = interaction.message || (await interaction.channel.messages.fetchPinned()).first();
 
-    if (initialMessage) {
-        const newRow = getTicketActionRow(false, true); // isClaimed: false, isSoftClosed: true
-        await initialMessage.edit({
-            content: `**Ticket Soft-Closed by ${interaction.user.tag}** | Ready for final deletion.`,
-            components: [newRow]
-        }).catch(e => console.error("Error editing initial message for soft close:", e));
-    }
-    
-    // 4. Lock permissions (deny creator and staff send access)
-    await interaction.channel.permissionOverwrites.edit(creator_id, { SendMessages: false });
-    await interaction.channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false });
+        if (initialMessage) {
+            const newRow = getTicketActionRow(false, true); // isClaimed: false, isSoftClosed: true
+            await initialMessage.edit({
+                content: `**Ticket Soft-Closed by ${interaction.user.tag}** | Ready for final deletion.`,
+                components: [newRow]
+            }).catch(e => console.error("Error editing initial message for soft close:", e));
+        }
+        
+        // 4. Lock permissions (deny creator and staff send access)
+        if (creator_id) {
+             await interaction.channel.permissionOverwrites.edit(creator_id, { SendMessages: false });
+        }
+        if (STAFF_ROLE_ID) {
+             await interaction.channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false });
+        } else {
+             console.warn('STAFF_ROLE_ID is missing. Cannot lock general staff sending messages.');
+        }
 
-    // 5. Send confirmation
-    const replyContent = `✅ Ticket soft-closed. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). The channel is now locked. Use **Finalize & Delete** to remove the channel.`;
-    
-    if (isSlashCommand) {
-        await interaction.editReply({ content: replyContent });
-    } else {
-        await interaction.editReply({ content: replyContent, ephemeral: true });
-        await interaction.channel.send(`💾 <@${staffId}> has **soft-closed** this ticket. It is now locked and awaiting final deletion.`);
+
+        // 5. Send confirmation
+        const replyContent = `✅ Ticket soft-closed. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). The channel is now locked. Use **Finalize & Delete** to remove the channel.`;
+        
+        if (isSlashCommand) {
+            await interaction.editReply({ content: replyContent });
+        } else {
+            await interaction.editReply({ content: replyContent, ephemeral: true });
+            await interaction.channel.send(`💾 <@${staffId}> has **soft-closed** this ticket. It is now locked and awaiting final deletion.`);
+        }
+    } catch (error) {
+        console.error('Error during Soft Close logic:', error);
+        
+        // Rollback state on failure
+        log.is_soft_closed = false;
+        ticketLogs.set(channelId, log);
+        updateRobuxBalance(staffId, -PAYOUT_VALUES[ticket_type] || 0);
+        
+        if (error.code === 50013) {
+            return interaction.editReply({ 
+                content: '❌ Soft Close Failed: The bot is missing permissions to **edit channel permissions** (Manage Roles) or **edit the initial ticket message**.', 
+                ephemeral: true 
+            });
+        }
+        throw error; // Re-throw to be caught by the general handler
     }
 }
 
@@ -938,71 +1033,78 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
     const isFinalizeDelete = interaction.customId === 'ticket_finalize_delete';
     
     // --- IN-MEMORY TICKET LOG CHECK ---
-    const log = getActiveTicketLog(channelId);
-
-    // Check logic: 
-    // - Finalize Delete needs a log entry where is_soft_closed is TRUE
-    // - Admin Delete needs any active log entry (or proceeds if none found for channel cleanup)
-    if (!log || (isFinalizeDelete && !log.is_soft_closed)) {
-        return interaction.editReply({ content: 'This ticket cannot be finalized or deleted right now. Check if it has been soft-closed/finalized already or contact an admin.', ephemeral: true });
+    const log = getActiveTicketLog(channelId) || { creator_id: 'Unknown', ticket_type: 'Unknown Ticket' }; // Fallback for admin delete
+    
+    // Check if the ticket should be soft-closed first (only applies to Finalize & Delete button)
+    if (isFinalizeDelete && !log.is_soft_closed) {
+        return interaction.editReply({ content: 'This ticket must be soft-closed first (which adds Robux) before finalizing the delete process.', ephemeral: true });
     }
     
-    const { creator_id, ticket_type } = log;
-    
-    // 1. Clean up cache
-    claimedTickets.delete(channelId);
+    try {
+        // 1. Clean up cache
+        claimedTickets.delete(channelId);
 
-    // 2. Fetch all messages for transcript
-    const creator = await interaction.guild.members.fetch(creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
-    const messages = await channel.messages.fetch({ limit: 200 }); 
-    const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-    const htmlContent = generateHtmlTranscript(sortedMessages, creator);
+        // 2. Fetch all messages for transcript
+        const creator = await interaction.guild.members.fetch(log.creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
+        const messages = await channel.messages.fetch({ limit: 200 }); 
+        const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+        const htmlContent = generateHtmlTranscript(sortedMessages, creator);
 
-    const logChannel = client.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID);
-    let transcriptUrl = 'URL not available.';
-    
-    if (logChannel) {
-        // 3. Upload Transcript
-        const attachment = new AttachmentBuilder(Buffer.from(htmlContent), { name: `transcript-${channel.name}-${Date.now()}.html` });
-        const logMessage = await logChannel.send({
-            content: `**TICKET DELETED & LOGGED**\nCreator: <@${creator_id}> (${creator.user.tag})\nType: ${ticket_type}\nStaff Finalizer: <@${interaction.user.id}>`,
-            files: [attachment]
-        });
+        const logChannel = client.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID);
+        let transcriptUrl = 'URL not available.';
+        
+        if (logChannel) {
+            // 3. Upload Transcript
+            const attachment = new AttachmentBuilder(Buffer.from(htmlContent), { name: `transcript-${channel.name}-${Date.now()}.html` });
+            const logMessage = await logChannel.send({
+                content: `**TICKET DELETED & LOGGED**\nCreator: <@${log.creator_id}> (${creator.user.tag})\nType: ${log.ticket_type}\nStaff Finalizer: <@${interaction.user.id}>`,
+                files: [attachment]
+            });
 
-        // 4. Extract Hosted Link 
-        transcriptUrl = logMessage.attachments.first()?.url || 'URL not available.';
+            // 4. Extract Hosted Link 
+            transcriptUrl = logMessage.attachments.first()?.url || 'URL not available.';
 
-        // Add Direct Link Button
-        const linkRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setLabel('Direct Link').setStyle(ButtonStyle.Link).setURL(transcriptUrl)
-        );
-        await logMessage.edit({ components: [linkRow] });
+            // Add Direct Link Button
+            const linkRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setLabel('Direct Link').setStyle(ButtonStyle.Link).setURL(transcriptUrl)
+            );
+            await logMessage.edit({ components: [linkRow] });
 
-        // 5. Update In-Memory Log (Finalize end_time and link. This marks the ticket as officially closed)
-        log.html_transcript_link = transcriptUrl;
-        log.end_time = new Date();
-        ticketLogs.set(channelId, log); // Store finalized log
-    } else {
-        // If log channel is missing, still mark as deleted in memory
-        log.end_time = new Date();
-        ticketLogs.set(channelId, log);
-        await interaction.editReply({ content: '❌ Transcript log channel not found. Deleting ticket without logging.', ephemeral: true });
+            // 5. Update In-Memory Log (Finalize end_time and link. This marks the ticket as officially closed)
+            log.html_transcript_link = transcriptUrl;
+            log.end_time = new Date();
+            ticketLogs.set(channelId, log); // Store finalized log
+        } else {
+            console.error(`TRANSCRIPT_LOG_CHANNEL_ID: ${TRANSCRIPT_LOG_CHANNEL_ID} not found. Deleting ticket without logging.`);
+            // If log channel is missing, still mark as deleted in memory
+            log.end_time = new Date();
+            ticketLogs.set(channelId, log);
+        }
+
+        // 6. Send final confirmation
+        const finalReply = `✅ Ticket finalized and deleted. Transcript saved to logs (if configured). Channel will be deleted in 5 seconds.`;
+        
+        if (isSlashCommand) {
+            await interaction.editReply({ content: finalReply });
+        } else {
+            await interaction.editReply({ content: finalReply, ephemeral: true });
+        }
+
+        // 7. Delete Channel
+        setTimeout(() => {
+            channel.delete('Ticket finalized and deleted by staff.').catch(err => console.error('Error deleting channel (requires Manage Channels permission):', err));
+            ticketLogs.delete(channelId); // Clean up the map after deletion
+        }, 5000);
+    } catch (error) {
+         console.error('Error during Hard Delete logic:', error);
+         if (error.code === 50013) {
+            return interaction.editReply({ 
+                content: '❌ Delete Failed: The bot is missing permissions to **delete the channel** (Manage Channels) or **send messages in the Transcript Log Channel**.', 
+                ephemeral: true 
+            });
+        }
+        throw error; // Re-throw to be caught by the general handler
     }
-
-    // 6. Send final confirmation
-    const finalReply = `✅ Ticket finalized and deleted. Transcript saved. Channel will be deleted in 5 seconds.`;
-    
-    if (isSlashCommand) {
-        await interaction.editReply({ content: finalReply });
-    } else {
-        await interaction.editReply({ content: finalReply, ephemeral: true });
-    }
-
-    // 7. Delete Channel
-    setTimeout(() => {
-        channel.delete('Ticket finalized and deleted by staff.').catch(err => console.error('Error deleting channel:', err));
-        ticketLogs.delete(channelId); // Clean up the map after deletion
-    }, 5000);
 }
 
 
@@ -1015,32 +1117,31 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
  * @param {string[]} args Array containing [staffId, amount].
  */
 async function handlePayoutApproval(interaction, action, args) {
-    await interaction.deferReply({ ephemeral: true });
-
+    // Reply already deferred in handleButton
     const [staffId, amountStr] = args;
     const amount = parseInt(amountStr);
     const approverId = interaction.user.id;
     const isApproval = action === 'payout_approve';
 
-    // Disable buttons immediately to prevent double-processing
-    const disabledRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('approved').setLabel(isApproval ? '✅ Approved' : '❌ Denied').setStyle(isApproval ? ButtonStyle.Success : ButtonStyle.Danger).setDisabled(true)
-    );
-    await interaction.message.edit({ components: [disabledRow] });
-
-    if (!isApproval) {
-        try {
-            const staffMember = await client.users.fetch(staffId);
-            await staffMember.send(`❌ Your Robux payout request for **${amount} R$** has been **denied** by <@${approverId}>. Please contact them for details.`);
-            return interaction.editReply({ content: `❌ Successfully denied payout request for <@${staffId}>.` });
-        } catch (error) {
-            console.error('Error denying payout:', error);
-            return interaction.editReply({ content: `❌ Denied, but could not DM staff member <@${staffId}>.` });
-        }
-    }
-
-    // Approval Logic
     try {
+        // Disable buttons immediately to prevent double-processing
+        const disabledRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('approved').setLabel(isApproval ? '✅ Approved' : '❌ Denied').setStyle(isApproval ? ButtonStyle.Success : ButtonStyle.Danger).setDisabled(true)
+        );
+        await interaction.message.edit({ components: [disabledRow] });
+
+        if (!isApproval) {
+            try {
+                const staffMember = await client.users.fetch(staffId);
+                await staffMember.send(`❌ Your Robux payout request for **${amount} R$** has been **denied** by <@${approverId}>. Please contact them for details.`);
+                return interaction.editReply({ content: `❌ Successfully denied payout request for <@${staffId}>.` });
+            } catch (error) {
+                console.error('Error denying payout:', error);
+                return interaction.editReply({ content: `❌ Denied, but could not DM staff member <@${staffId}>.` });
+            }
+        }
+
+        // Approval Logic
         // --- IN-MEMORY BALANCE CHECK ---
         const balanceData = staffData.get(staffId);
         const currentBalance = balanceData ? balanceData.robux_balance : 0;
@@ -1076,8 +1177,13 @@ async function handlePayoutApproval(interaction, action, args) {
 
     } catch (error) {
         console.error('Error during payout approval:', error);
-        updateRobuxBalance(staffId, amount); // CRITICAL: Rollback balance if transaction fails
-        await interaction.editReply({ content: '❌ A critical error occurred during approval and transaction logging. Balance has been potentially rolled back. Check logs immediately.' });
+        
+        // CRITICAL: Rollback balance if transaction fails mid-process (approval attempt was made)
+        if (isApproval) {
+            updateRobuxBalance(staffId, amount); 
+        }
+        
+        throw error; // Re-throw to be caught by the general handler
     }
 }
 
