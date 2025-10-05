@@ -1,32 +1,32 @@
 // Discord Ticket System Bot Logic (Requires Node.js Environment)
-// This file has been updated to use environment variables for secure deployment and includes Firestore logic.
+// This file has been updated to use Supabase (PostgreSQL + Storage) for persistence.
 
 const { Client, GatewayIntentBits, Partials, Collection, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, SlashCommandBuilder } = require('discord.js');
-const admin = require('firebase-admin');
+const { createClient } = require('@supabase/supabase-js');
+const { v4: uuidv4 } = require('uuid'); // Needed for generating unique transcript file names
 
-// --- FIREBASE INITIALIZATION ---
-// Railway requires the Service Account Key JSON to be passed as a single base64-encoded environment variable.
-let db;
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+// --- SUPABASE INITIALIZATION ---
+// Supabase requires two environment variables: URL and ANON_KEY
+let supabase;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const STORAGE_BUCKET_NAME = 'transcripts'; // Hardcoded bucket name for simplicity
+
+if (SUPABASE_URL && SUPABASE_ANON_KEY) {
     try {
-        // Decode the base64 string back into the JSON object
-        const serviceAccountJson = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, 'base64').toString('utf8');
-        const serviceAccount = JSON.parse(serviceAccountJson);
-        
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-        console.log("Firebase Admin SDK initialized successfully.");
-        db = admin.firestore();
-
+        supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        console.log("Supabase client initialized successfully.");
     } catch (error) {
-        console.error("FIREBASE ERROR: Failed to parse or initialize Firebase Admin SDK. The bot will not persist data.", error.message);
-        // The bot will continue running without persistence, but core features will fail.
+        console.error("SUPABASE ERROR: Failed to initialize Supabase client.", error.message);
     }
 } else {
-    // This warning should appear if the environment variable is missing
-    console.error("FIREBASE ERROR: FIREBASE_SERVICE_ACCOUNT environment variable is not set. The bot will not persist data.");
+    console.error("SUPABASE ERROR: SUPABASE_URL or SUPABASE_ANON_KEY environment variable is not set. The bot will not persist data.");
 }
+
+// NOTE: Unlike Firebase, Supabase uses tables for collections, which we must define.
+// We will assume the following tables exist in your Supabase DB:
+const TICKET_TABLE = 'tickets';
+const STATS_TABLE = 'staff_stats';
 
 
 // --- BOT CONFIGURATION (Loaded from environment variables) ---
@@ -47,10 +47,6 @@ const PAYOUT_MIN = 300;
 const PAYOUT_MAX = 700;
 const AUTO_UNCLAIM_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
-// Collection names for Firestore
-const TICKET_COLLECTION = 'tickets';
-const STATS_COLLECTION = 'staff_stats';
-
 // Map to hold active unclaim timers (key: channelId, value: setTimeout object)
 const activeTimers = new Map();
 
@@ -64,91 +60,177 @@ const MEDIA_QUESTIONS = [
 ];
 
 
-// --- PERSISTENCE FUNCTIONS (Using Firestore) ---
+// --- PERSISTENCE FUNCTIONS (Using Supabase - PostgreSQL) ---
 
 /**
- * Retrieves staff statistics from Firestore.
+ * Retrieves staff statistics from Supabase. Supabase uses primary key ('id' which is the userId).
+ * If no record exists, it returns a default.
  * @param {string} userId - The staff member's Discord ID.
  * @returns {Promise<object>} Staff stats object.
  */
 async function getStaffStats(userId) {
     try {
-        // Fallback for non-initialized DB to prevent crashes
-        if (!db) return { completedTickets: 0, robux: 0 };
+        if (!supabase) return { completedTickets: 0, robux: 0 };
         
-        const docRef = db.collection(STATS_COLLECTION).doc(userId);
-        const doc = await docRef.get();
-        if (doc.exists) {
-            return doc.data();
+        const { data, error } = await supabase
+            .from(STATS_TABLE)
+            .select('*')
+            .eq('id', userId)
+            .single();
+
+        if (error && error.code !== 'PGRST116') { // PGRST116 means "not found" which is fine
+            throw error;
         }
-        return { completedTickets: 0, robux: 0 }; // Default stats
+
+        return data || { id: userId, completedTickets: 0, robux: 0 }; 
     } catch (e) {
-        console.error(`Error fetching staff stats for ${userId}:`, e);
-        return { completedTickets: 0, robux: 0 }; 
+        console.error(`Error fetching staff stats for ${userId}:`, e.message);
+        return { id: userId, completedTickets: 0, robux: 0 }; 
     }
 }
 
 /**
- * Updates staff statistics in Firestore.
+ * Updates staff statistics in Supabase. Uses upsert for "set" functionality.
  * @param {string} userId - The staff member's Discord ID.
  * @param {object} data - Data to update/merge.
  */
 async function updateStaffStats(userId, data) {
     try {
-        if (!db) return;
-        const docRef = db.collection(STATS_COLLECTION).doc(userId);
-        await docRef.set(data, { merge: true });
+        if (!supabase) return;
+        
+        // Supabase requires merging the ID into the data object for upsert
+        const updateData = { id: userId, ...data };
+
+        const { error } = await supabase
+            .from(STATS_TABLE)
+            .upsert(updateData, { onConflict: 'id' });
+
+        if (error) throw error;
+
     } catch (e) {
-        console.error(`Error updating staff stats for ${userId}:`, e);
+        console.error(`Error updating staff stats for ${userId}:`, e.message);
     }
 }
 
 /**
- * Retrieves ticket data from Firestore.
+ * Retrieves ticket data from Supabase. Primary key is the channelId.
  * @param {string} channelId - The Discord channel ID.
  * @returns {Promise<object | null>} Ticket data object or null.
  */
 async function getTicket(channelId) {
     try {
-        if (!db) return null;
-        const docRef = db.collection(TICKET_COLLECTION).doc(channelId);
-        const doc = await docRef.get();
-        return doc.exists ? doc.data() : null;
+        if (!supabase) return null;
+        
+        const { data, error } = await supabase
+            .from(TICKET_TABLE)
+            .select('*')
+            .eq('id', channelId)
+            .single();
+            
+        if (error && error.code !== 'PGRST116') {
+            throw error;
+        }
+
+        // If data is null, the ticket doesn't exist
+        return data; 
     } catch (e) {
-        console.error(`Error fetching ticket ${channelId}:`, e);
+        console.error(`Error fetching ticket ${channelId}:`, e.message);
         return null; 
     }
 }
 
 /**
- * Sets or updates ticket data in Firestore.
+ * Sets or updates ticket data in Supabase. Uses upsert for "set" functionality.
  * @param {string} channelId - The Discord channel ID.
  * @param {object} data - Data to set/update.
  */
 async function setTicket(channelId, data) {
     try {
-        if (!db) return;
-        const docRef = db.collection(TICKET_COLLECTION).doc(channelId);
-        await docRef.set(data, { merge: true });
+        if (!supabase) return;
+        
+        // Supabase requires merging the ID into the data object for upsert
+        const updateData = { id: channelId, ...data };
+        
+        const { error } = await supabase
+            .from(TICKET_TABLE)
+            .upsert(updateData, { onConflict: 'id' });
+
+        if (error) throw error;
+
     } catch (e) {
-        console.error(`Error setting ticket ${channelId}:`, e);
+        console.error(`Error setting ticket ${channelId}:`, e.message);
     }
 }
 
 /**
- * Deletes ticket data from Firestore.
+ * Deletes ticket data from Supabase.
  * @param {string} channelId - The Discord channel ID.
  */
 async function deleteTicket(channelId) {
     try {
-        if (!db) return;
-        await db.collection(TICKET_COLLECTION).doc(channelId).delete();
+        if (!supabase) return;
+        
+        const { error } = await supabase
+            .from(TICKET_TABLE)
+            .delete()
+            .eq('id', channelId);
+            
+        if (error) throw error;
+
     } catch (e) {
-        console.error(`Error deleting ticket ${channelId}:`, e);
+        console.error(`Error deleting ticket ${channelId}:`, e.message);
     }
 }
 
-// --- END PERSISTENCE FUNCTIONS ---
+// --- SUPABASE STORAGE FUNCTIONS ---
+
+/**
+ * Uploads the HTML transcript to Supabase Storage and returns the public URL.
+ * @param {string} channelName - The name of the Discord channel (used for file path).
+ * @param {string} htmlContent - The HTML content to upload.
+ * @returns {Promise<string | null>} The public download URL or null on failure.
+ */
+async function uploadTranscriptToStorage(channelName, htmlContent) {
+    if (!supabase) {
+        console.error("Supabase client is not initialized. Cannot upload transcript.");
+        return null;
+    }
+
+    // Use a unique file name to avoid clashes
+    const fileName = `${channelName}_transcript_${uuidv4()}.html`;
+    const path = `${fileName}`; // Saved directly under the bucket (e.g., transcripts/file.html)
+    const transcriptBuffer = Buffer.from(htmlContent, 'utf-8');
+
+    try {
+        // Upload the file as a buffer
+        const { error: uploadError } = await supabase.storage
+            .from(STORAGE_BUCKET_NAME)
+            .upload(path, transcriptBuffer, {
+                contentType: 'text/html',
+                upsert: false // We use a unique ID, so no upsert needed
+            });
+
+        if (uploadError) throw uploadError;
+
+        // Get the public URL for the file
+        const { data: publicUrlData } = supabase.storage
+            .from(STORAGE_BUCKET_NAME)
+            .getPublicUrl(path);
+
+        if (!publicUrlData || !publicUrlData.publicUrl) {
+            console.error("Failed to retrieve public URL after successful upload.");
+            return null;
+        }
+
+        return publicUrlData.publicUrl; 
+
+    } catch (e) {
+        console.error(`Error uploading transcript ${fileName}:`, e.message);
+        return null;
+    }
+}
+
+// --- END PERSISTENCE & STORAGE FUNCTIONS ---
 
 
 const client = new Client({ 
@@ -183,7 +265,83 @@ client.on('ready', async () => {
     }
 });
 
-// --- HELPER FUNCTIONS ---
+// --- DYNAMIC CONTROL ROW HELPER (Same as previous version) ---
+
+/**
+ * Generates the dynamic action row for ticket controls, swapping buttons based on state.
+ * @param {object} ticketData - The current ticket data from Supabase.
+ * @returns {ActionRowBuilder}
+ */
+function getTicketControlRow(ticketData) {
+    const isClaimed = !!ticketData.claimedBy;
+    const isClosed = ticketData.isClosed;
+
+    let claimButton;
+    if (isClaimed) {
+        // Swaps: Show Unclaim button if claimed
+        claimButton = new ButtonBuilder()
+            .setCustomId('unclaim_ticket')
+            .setLabel('Unclaim')
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('🔓');
+    } else {
+        // Swaps: Show Claim button if unclaimed
+        claimButton = new ButtonBuilder()
+            .setCustomId('claim_ticket')
+            .setLabel('Claim')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('🔒');
+    }
+
+    let deleteCloseButton;
+    if (isClosed) {
+        // Swaps: Show Delete button if closed
+        deleteCloseButton = new ButtonBuilder()
+            .setCustomId('delete_ticket')
+            .setLabel('Delete (Log)')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('🗑️');
+    } else {
+        // Swaps: Show Close button if open
+        deleteCloseButton = new ButtonBuilder()
+            .setCustomId('close_ticket')
+            .setLabel('Close')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('🛑');
+    }
+    
+    const row = new ActionRowBuilder().addComponents(claimButton, deleteCloseButton);
+    return row;
+}
+
+/**
+ * Finds the control message and updates its components based on current ticket state.
+ * @param {Channel} channel - The Discord channel object.
+ * @param {object} ticketData - The current ticket data from Supabase.
+ */
+async function updateControlMessage(channel, ticketData) {
+    if (!ticketData.controlMessageId) return;
+
+    // Get the latest ticket data in case the action handler hasn't committed it yet
+    const latestTicketData = await getTicket(channel.id);
+    if (!latestTicketData) return;
+
+    const newRow = getTicketControlRow(latestTicketData);
+    
+    try {
+        const message = await channel.messages.fetch(latestTicketData.controlMessageId);
+        // Retain any existing embeds from the original message (like the initial welcome embed or media summary)
+        await message.edit({ embeds: message.embeds, components: [newRow] });
+    } catch (e) {
+        console.error("Failed to edit control message, it may have been deleted:", e.message);
+        // If the message is gone, remove the ID from the database
+        const updateData = { controlMessageId: null };
+        await setTicket(channel.id, updateData);
+    }
+}
+
+
+// --- HELPER FUNCTIONS (Some remain the same) ---
 
 /**
  * Starts or resets the 20-minute auto-unclaim timer.
@@ -201,7 +359,7 @@ function startUnclaimTimer(channelId) {
         const ticketData = await getTicket(channelId);
 
         if (channel && ticketData && ticketData.claimedBy) {
-            await unclaimTicket(channel, ticketData);
+            await unclaimTicket(channel, ticketData); // This will update the state and controls
             channel.send({ content: 
                 `⚠️ **Auto-Unclaimed:** The staff member <@${ticketData.claimedBy}> did not reply within 20 minutes of the user's last message. The ticket is now open for any support member to claim.` 
             });
@@ -214,7 +372,6 @@ function startUnclaimTimer(channelId) {
 
 /**
  * Applies or removes the claim lock on the channel permissions.
- * (Implementation remains the same, relying on Discord API)
  */
 async function applyClaimLock(channel, claimedBy) {
     const guild = channel.guild;
@@ -247,32 +404,60 @@ async function applyClaimLock(channel, claimedBy) {
 }
 
 /**
- * Handles the unclaiming process.
+ * Handles the unclaiming process (updates state and controls).
  */
 async function unclaimTicket(channel, ticketData) {
     await applyClaimLock(channel, null); // Remove claim lock
-    await setTicket(channel.id, { ...ticketData, claimedBy: null, lastUserReplyAt: null });
+    const updatedData = { claimedBy: null, lastUserReplyAt: null };
+    await setTicket(channel.id, updatedData); // Only update the fields needed
+    
     if (activeTimers.has(channel.id)) {
         clearTimeout(activeTimers.get(channel.id));
         activeTimers.delete(channel.id);
     }
+    
+    // Update the control message to show the 'Claim' button
+    await updateControlMessage(channel, { id: channel.id, ...updatedData });
 }
 
 /**
- * Creates an HTML transcript of the channel content. (Implementation remains the same)
+ * Creates an HTML transcript of the channel content that mimics Discord's appearance.
+ * (Same as previous version, ensures visual consistency)
+ * @param {Channel} channel - The Discord channel object.
+ * @returns {Promise<string>} The HTML content of the transcript.
  */
 async function createTranscript(channel) {
-    // This is a simplified, basic HTML structure for demonstration.
+    // Fetch all messages in the channel (up to 100)
     const messages = await channel.messages.fetch({ limit: 100 });
     const sortedMessages = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 
-    let transcriptContent = sortedMessages.map(m => 
-        `<div class="message-container">
-            <span class="timestamp">[${m.createdAt.toLocaleString()}]</span>
-            <span class="author" style="color: ${m.member?.displayHexColor || '#fff'};">${m.author.tag}:</span>
-            <span class="content">${m.content.replace(/\n/g, '<br>')}</span>
-        </div>`
-    ).join('');
+    let transcriptContent = sortedMessages.map(m => {
+        const username = m.author.username;
+        const discriminator = m.author.discriminator; 
+        const tag = `${username}${discriminator !== '0' ? '#' + discriminator : ''}`;
+        const avatarUrl = m.author.displayAvatarURL({ extension: 'png', size: 64 });
+        const memberColor = m.member?.displayHexColor || '#ffffff';
+        const timestamp = m.createdAt.toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', year: 'numeric', month: 'numeric', day: 'numeric', hour12: true });
+        
+        // Basic content sanitization for HTML display
+        let content = m.content
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/\n/g, '<br>');
+
+        return `
+            <div class="message-container">
+                <img class="avatar" src="${avatarUrl}" alt="${tag} avatar">
+                <div class="message-content">
+                    <span class="header">
+                        <span class="author-name" style="color: ${memberColor};">${tag}</span>
+                        <span class="timestamp">${timestamp}</span>
+                    </span>
+                    <span class="text-content">${content}</span>
+                </div>
+            </div>`;
+    }).join('');
 
     return `
 <!DOCTYPE html>
@@ -282,21 +467,100 @@ async function createTranscript(channel) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ticket Transcript: #${channel.name}</title>
     <style>
-        body { font-family: sans-serif; background-color: #36393f; color: #dcddde; padding: 20px; }
-        .transcript-header { background-color: #2f3136; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
-        .message-container { margin-bottom: 10px; border-left: 2px solid #5865f2; padding-left: 10px; }
-        .timestamp { color: #72767d; font-size: 0.8em; margin-right: 5px; }
-        .author { font-weight: bold; margin-right: 5px; }
-        .content { white-space: pre-wrap; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: #36393f; /* Discord Dark Theme Background */
+            color: #dcddde; /* Discord Default Text Color */
+            padding: 20px; 
+            margin: 0;
+            display: flex;
+            justify-content: center;
+        }
+        .transcript-wrapper {
+            width: 100%;
+            max-width: 960px; /* Discord Max Width for chat area */
+        }
+        .transcript-header { 
+            background-color: #2f3136; /* Discord Channel Header Color */
+            padding: 20px; 
+            border-radius: 8px 8px 0 0; 
+            margin-bottom: 5px; 
+            border-bottom: 1px solid #202225;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .transcript-header h1 {
+            font-size: 1.5em;
+            color: #fff;
+            margin: 0;
+        }
+        .transcript-header p {
+            margin: 5px 0 0 0;
+            color: #b9bbbe;
+        }
+        .transcript-body {
+            background-color: #36393f; 
+            padding: 10px 0;
+        }
+        .message-container { 
+            display: flex;
+            padding: 5px 20px;
+            margin-bottom: 2px;
+            align-items: flex-start;
+            transition: background-color 0.1s;
+        }
+        .message-container:hover {
+            background-color: #32353b; /* Hover effect */
+        }
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            margin-right: 15px;
+            flex-shrink: 0;
+            object-fit: cover;
+            margin-top: 2px;
+        }
+        .message-content {
+            display: flex;
+            flex-direction: column;
+            line-height: 1.4;
+            flex-grow: 1;
+        }
+        .header {
+            margin-bottom: 2px;
+            display: flex;
+            align-items: center;
+        }
+        .author-name { 
+            font-weight: 500; 
+            font-size: 1em;
+            margin-right: 8px; 
+        }
+        .timestamp { 
+            color: #72767d; 
+            font-size: 0.75em; 
+            font-weight: 400;
+        }
+        .text-content { 
+            word-wrap: break-word;
+            word-break: break-all;
+            color: #dcddde;
+        }
     </style>
 </head>
 <body>
-    <div class="transcript-header">
-        <h1>Transcript for #${channel.name}</h1>
-        <p>Created on: ${new Date().toLocaleString()}</p>
-    </div>
-    <div class="transcript-body">
-        ${transcriptContent}
+    <div class="transcript-wrapper">
+        <div class="transcript-header">
+            <h1>Ticket Transcript: #${channel.name}</h1>
+            <p>User: ${sortedMessages[0]?.author.tag || 'N/A'}</p>
+            <p>Created on: ${new Date().toLocaleString()}</p>
+        </div>
+        <div class="transcript-body">
+            ${transcriptContent}
+        </div>
     </div>
 </body>
 </html>
@@ -306,6 +570,7 @@ async function createTranscript(channel) {
 
 /**
  * Handles the multi-step questionnaire for media applications.
+ * (Same as previous version)
  */
 async function handleQuestionnaire(message, ticketData) {
     const channel = message.channel;
@@ -334,20 +599,14 @@ async function handleQuestionnaire(message, ticketData) {
         // Questionnaire complete: Finalize ticket and unclaim from BOT
         
         // Final state update
-        await setTicket(channel.id, { 
+        let updatedData = { 
             claimedBy: null, // Unclaim for staff to take over
             step: 999, // Mark as complete
             qna: newQna, // Save final answer
             isClosed: false // Ensure it's not marked closed yet
-        });
+        };
         
-        const controlsRow = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder().setCustomId('claim_ticket').setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🔒'),
-                new ButtonBuilder().setCustomId('close_ticket').setLabel('Close').setStyle(ButtonStyle.Secondary).setEmoji('🛑'),
-                new ButtonBuilder().setCustomId('delete_ticket').setLabel('Delete (Log)').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
-                new ButtonBuilder().setCustomId('unclaim_ticket').setLabel('Unclaim').setStyle(ButtonStyle.Primary).setEmoji('🔓'),
-            );
+        const controlsRow = getTicketControlRow({ id: channel.id, ...updatedData }); // Get dynamic controls
             
         // Compile a summary of answers
         const summaryEmbed = new EmbedBuilder()
@@ -363,16 +622,20 @@ async function handleQuestionnaire(message, ticketData) {
             .setColor('#2ECC71'); 
 
         // Initial message (now with management buttons)
-        await channel.send({ 
+        const controlMessage = await channel.send({ 
             content: `🎉 **Questionnaire Complete!** The ticket is now open for <@&${STAFF_ROLE_ID}> to claim and review.`, 
             embeds: [summaryEmbed], 
             components: [controlsRow] 
         });
+        
+        // Save the control message ID for future edits
+        updatedData.controlMessageId = controlMessage.id;
+        await setTicket(channel.id, updatedData);
     }
 }
 
 
-// --- SLASH COMMAND HANDLER ---
+// --- SLASH COMMAND HANDLER (Mostly the same) ---
 client.on('interactionCreate', async interaction => {
     if (interaction.isCommand()) {
         const { commandName } = interaction;
@@ -389,12 +652,12 @@ client.on('interactionCreate', async interaction => {
         } else if (commandName === 'close') {
             await closeCommand(interaction);
         } else if (commandName === 'delete') {
-            await deleteCommand(interaction);
+            await deleteCommand(interaction); // Updated to use Supabase Storage
         }
     }
 });
 
-// --- COMMAND IMPLEMENTATIONS ---
+// --- COMMAND IMPLEMENTATIONS (Only deleteCommand updated) ---
 
 async function sendTicketPanel(interaction) {
     const panelEmbed = new EmbedBuilder()
@@ -417,7 +680,7 @@ async function sendTicketPanel(interaction) {
 async function checkRobuxCommand(interaction) {
     await interaction.deferReply({ ephemeral: true });
     const userId = interaction.user.id;
-    // Use Firestore function
+    // Use Supabase function
     const stats = await getStaffStats(userId);
 
     const embed = new EmbedBuilder()
@@ -437,7 +700,7 @@ async function checkRobuxCommand(interaction) {
 async function payoutCommand(interaction) {
     await interaction.deferReply({ ephemeral: true });
     const userId = interaction.user.id;
-    // Use Firestore function
+    // Use Supabase function
     const stats = await getStaffStats(userId);
 
     if (stats.robux < PAYOUT_MIN) {
@@ -482,7 +745,7 @@ async function payoutCommand(interaction) {
         // The role mention ensures the high staff is notified
         await highStaffChannel.send({ content: `<@&${HIGH_STAFF_ROLE_ID}>`, embeds: [payoutEmbed] });
         
-        // IMPORTANT: Reset the staff's Robux count to 0 in Firestore after successful request logging
+        // IMPORTANT: Reset the staff's Robux count to 0 in Supabase after successful request logging
         await updateStaffStats(userId, { robux: 0, completedTickets: 0, lastPayout: Date.now() }); 
 
         interaction.followUp({ content: '✅ Payout request submitted! A high-ranking staff member will review and process the payout via the gamepass link shortly. Your earnings have been logged and reset for processing.', ephemeral: true });
@@ -492,9 +755,6 @@ async function payoutCommand(interaction) {
     }
 }
 
-/**
- * Handles closing a ticket via the /close slash command.
- */
 async function closeCommand(interaction) {
     const { channel, member } = interaction;
     const userId = interaction.user.id;
@@ -520,16 +780,17 @@ async function closeCommand(interaction) {
     // 4. Close the ticket (lock user out)
     await channel.permissionOverwrites.edit(ticketData.userId, { SendMessages: false });
     
-    // 5. Set isClosed state in Firestore (FIX for delete issue)
-    await setTicket(channel.id, { isClosed: true });
+    // 5. Set isClosed state in Supabase
+    const updatedData = { isClosed: true };
+    await setTicket(channel.id, updatedData);
 
     await channel.send(`🛑 **Closed:** The ticket has been closed by <@${userId}>. Only staff can now delete the ticket. The original user (<@${ticketData.userId}>) can no longer reply.`);
     await interaction.editReply('Ticket closed successfully.');
+    
+    // 6. Update control message buttons
+    await updateControlMessage(channel, { id: channel.id, ...updatedData });
 }
 
-/**
- * Handles deleting a ticket via the /delete slash command.
- */
 async function deleteCommand(interaction) {
     const { channel, member } = interaction;
     const userId = interaction.user.id;
@@ -545,21 +806,35 @@ async function deleteCommand(interaction) {
         return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
     }
     
-    // 3. Check for closed state using Firestore data (FIX for delete issue)
+    // 3. Check for closed state using Supabase data
     if (!ticketData.isClosed) {
          return interaction.reply({ content: 'Please close the ticket first using the "Close" button or `/close` command to prevent user replies during deletion.', ephemeral: true });
     }
 
     await interaction.deferReply({ ephemeral: true });
     
-    // 4. Generate Transcript
-    await interaction.editReply('Generating transcript and deleting ticket...');
+    // 4. Generate Transcript and Upload
+    await interaction.editReply('Generating transcript, uploading, and deleting ticket...');
     const htmlTranscript = await createTranscript(channel);
     const logChannel = client.channels.cache.get(LOG_CHANNEL_ID);
     
+    let transcriptUrl = null;
+    let attachmentFile = null;
+
     if (logChannel) {
-        const transcriptBuffer = Buffer.from(htmlTranscript, 'utf-8');
-        
+        // --- NEW: UPLOAD TO SUPABASE STORAGE ---
+        transcriptUrl = await uploadTranscriptToStorage(channel.name, htmlTranscript);
+
+        // Always create a local buffer attachment as a safety backup
+        attachmentFile = {
+            attachment: Buffer.from(htmlTranscript, 'utf-8'), 
+            name: `${channel.name}_transcript.html` 
+        };
+        // ----------------------------------------
+
+        const linkUrl = transcriptUrl || 'https://storage-upload-failed.example.com/';
+        const linkLabel = transcriptUrl ? 'View Transcript (Direct Link)' : 'View Transcript (Local File Only)';
+
         const transcriptEmbed = new EmbedBuilder()
             .setTitle('Ticket Transcript Log')
             .setDescription(`Ticket #${channel.name} deleted by <@${userId}>.`)
@@ -569,26 +844,32 @@ async function deleteCommand(interaction) {
             )
             .setColor('#2C2F33');
 
-        const linkPlaceholder = 'https://transcript-storage.example.com/' + channel.id; 
         const linkRow = new ActionRowBuilder()
             .addComponents(
-                new ButtonBuilder().setURL(linkPlaceholder).setLabel('Direct Link (Example)').setStyle(ButtonStyle.Link),
+                new ButtonBuilder().setURL(linkUrl).setLabel(linkLabel).setStyle(ButtonStyle.Link),
             );
         
         await logChannel.send({ 
             embeds: [transcriptEmbed], 
-            files: [{ attachment: transcriptBuffer, name: `${channel.name}_transcript.html` }],
+            files: attachmentFile ? [attachmentFile] : [],
             components: [linkRow]
         });
     }
 
     // 5. Robux/Stats Update (Only if claimed)
-    if (ticketData.claimedBy && ticketData.claimedBy !== 'BOT_INTERACTION' && db) {
-        // Increment completedTickets and Robux in one atomic operation
-        await db.collection(STATS_COLLECTION).doc(ticketData.claimedBy).set({
-            completedTickets: admin.firestore.FieldValue.increment(1),
-            robux: admin.firestore.FieldValue.increment(ROBOT_VALUE_PER_TICKET)
-        }, { merge: true });
+    if (ticketData.claimedBy && ticketData.claimedBy !== 'BOT_INTERACTION' && supabase) {
+        // We need to fetch the current stats, increment them manually, and then save them back.
+        // SQL update is more complex, so we'll use a transaction style read-modify-write.
+        
+        const currentStats = await getStaffStats(ticketData.claimedBy);
+        
+        const newCompletedTickets = currentStats.completedTickets + 1;
+        const newRobux = currentStats.robux + ROBOT_VALUE_PER_TICKET;
+
+        await updateStaffStats(ticketData.claimedBy, {
+            completedTickets: newCompletedTickets,
+            robux: newRobux
+        });
     }
     
     // 6. Clean up and delete
@@ -599,14 +880,14 @@ async function deleteCommand(interaction) {
     }
     
     // Final reply for ephemeral interaction
-    await interaction.editReply('Ticket deleted and transcript logged.');
+    await interaction.editReply('Ticket deleted, transcript uploaded, and log sent.');
     
     // Actual channel deletion
     setTimeout(() => channel.delete().catch(console.error), 1000); 
 }
 
 
-// --- BUTTON INTERACTION HANDLER ---
+// --- BUTTON INTERACTION HANDLER (Only delete_ticket updated) ---
 client.on('interactionCreate', async interaction => {
     if (!interaction.isButton()) return;
 
@@ -634,17 +915,24 @@ async function handleTicketCreation(interaction, typeId) {
         return interaction.editReply('Error: Staff role or category channel not found. Bot configuration is incomplete.');
     }
 
-    // Check for existing open ticket by this user using a Firestore query
-    if (db) {
-        const allTicketsSnapshot = await db.collection(TICKET_COLLECTION).where('userId', '==', user.id).get();
-        if (!allTicketsSnapshot.empty) {
-            const existingTicketDoc = allTicketsSnapshot.docs[0];
-            const existingTicketChannel = guild.channels.cache.get(existingTicketDoc.id);
+    // Check for existing open ticket by this user using a Supabase query
+    if (supabase) {
+        const { data: existingTickets, error } = await supabase
+            .from(TICKET_TABLE)
+            .select('id')
+            .eq('userId', user.id)
+            .limit(1);
+
+        if (error) {
+            console.error('Supabase query error:', error);
+            // Continue even on error to attempt ticket creation, but log the error
+        } else if (existingTickets && existingTickets.length > 0) {
+            const existingTicketChannel = guild.channels.cache.get(existingTickets[0].id);
             if (existingTicketChannel) {
                 return interaction.editReply({ content: `You already have an open ticket at ${existingTicketChannel}. Please close that one first.`, ephemeral: true });
             } else {
                 // Clean up stale data if channel is gone but doc exists
-                await deleteTicket(existingTicketDoc.id);
+                await deleteTicket(existingTickets[0].id);
             }
         }
     }
@@ -663,48 +951,44 @@ async function handleTicketCreation(interaction, typeId) {
         ],
     });
 
-    // 2. Store ticket data in database
+    // 2. Define initial ticket data
     const isMediaTicket = typeId === 'media_apply';
     let initialClaimedBy = null;
     let initialStep = 0;
     
-    // If it's a media ticket, set bot interaction state for the questionnaire flow
     if (isMediaTicket) {
         initialClaimedBy = 'BOT_INTERACTION'; 
         initialStep = 1; 
     }
-
-    await setTicket(channel.id, {
+    
+    let ticketData = {
+        id: channel.id, // Supabase primary key must be here
         userId: user.id,
         type: typeId,
-        claimedBy: initialClaimedBy, // Set to 'BOT_INTERACTION' if media ticket
+        claimedBy: initialClaimedBy, 
         createdAt: Date.now(),
         lastUserReplyAt: null,
-        step: initialStep, // Start at step 1 for media
-        qna: {}, // To store answers
-        isClosed: false // Initial state: not closed
-    });
+        step: initialStep, 
+        qna: {}, 
+        isClosed: false,
+        controlMessageId: null // Will be updated after message is sent
+    };
 
     // 3. Update interaction response as requested
     await interaction.editReply({ content: `✅ **Ticket created!** Redirecting you to the channel: ${channel}` });
 
     if (isMediaTicket) {
         // Media flow: Ask first question immediately
+        await setTicket(channel.id, ticketData); // Save initial state before message
         const firstQuestion = MEDIA_QUESTIONS.find(q => q.step === 1);
         await channel.send(`👋 Welcome, <@${user.id}>! This is a **Media Application**. To proceed, please answer the following questions.
 
 **Question 1/${MEDIA_QUESTIONS.length}: ${firstQuestion.prompt}**`);
-        return; // Exit here, wait for questionnaire response, don't send management buttons yet.
+        return; 
     }
 
     // --- STANDARD TICKET FLOW (If not media) ---
-    const controlsRow = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder().setCustomId('claim_ticket').setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🔒'),
-            new ButtonBuilder().setCustomId('close_ticket').setLabel('Close').setStyle(ButtonStyle.Secondary).setEmoji('🛑'),
-            new ButtonBuilder().setCustomId('delete_ticket').setLabel('Delete (Log)').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
-            new ButtonBuilder().setCustomId('unclaim_ticket').setLabel('Unclaim').setStyle(ButtonStyle.Primary).setEmoji('🔓'),
-        );
+    const controlsRow = getTicketControlRow(ticketData);
 
     const initialEmbed = new EmbedBuilder()
         .setTitle(`${ticketType.name} Ticket`)
@@ -713,11 +997,15 @@ async function handleTicketCreation(interaction, typeId) {
         .setColor('#5865F2');
 
     // Send initial message with controls for standard tickets
-    await channel.send({ 
+    const controlMessage = await channel.send({ 
         content: `👋 Hey @everyone! <@&${STAFF_ROLE_ID}> A new ticket has been opened by <@${user.id}>.`, 
         embeds: [initialEmbed], 
         components: [controlsRow] 
     });
+    
+    // 4. Save the control message ID
+    ticketData.controlMessageId = controlMessage.id;
+    await setTicket(channel.id, ticketData);
 }
 
 async function handleTicketManagement(interaction) {
@@ -728,7 +1016,7 @@ async function handleTicketManagement(interaction) {
         return interaction.reply({ content: 'You are not a staff member and cannot manage tickets.', ephemeral: true });
     }
 
-    // Get ticket status from DB (Firestore)
+    // Get ticket status from DB (Supabase)
     const ticketData = await getTicket(channel.id);
     if (!ticketData) {
         return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
@@ -748,45 +1036,69 @@ async function handleTicketManagement(interaction) {
         
         // Claim the ticket
         await applyClaimLock(channel, user.id);
-        await setTicket(channel.id, { ...ticketData, claimedBy: user.id });
+        const updatedData = { claimedBy: user.id };
+        await setTicket(channel.id, updatedData);
         
         await channel.send(`🔒 **Claimed:** This ticket has been claimed by <@${user.id}>. Other staff members can no longer reply.`);
         await interaction.editReply('You have successfully claimed the ticket.');
+        
+        // Update control message to show 'Unclaim' button
+        await updateControlMessage(channel, { id: channel.id, ...updatedData });
 
     } else if (customId === 'unclaim_ticket') {
-        if (!ticketData.claimedBy || ticketData.claimedBy !== user.id) {
-            return interaction.editReply(`You cannot unclaim this ticket as it is currently claimed by <@${ticketData.claimedBy || 'no one'}>, or you are not the claimant.`);
+        if (!ticketData.claimedBy) {
+            return interaction.editReply('This ticket is not currently claimed.');
         }
+        // Allow any staff member to unclaim to prevent deadlocks
         
-        // Unclaim the ticket
+        // Unclaim the ticket (unclaimTicket handles DB update and control message update)
         await unclaimTicket(channel, ticketData);
         await channel.send(`🔓 **Unclaimed:** The ticket has been unclaimed by <@${user.id}> and is now open for any staff member to reply.`);
         await interaction.editReply('You have successfully unclaimed the ticket.');
 
+
     } else if (customId === 'close_ticket') {
         // Close the ticket (lock user out)
         await channel.permissionOverwrites.edit(ticketData.userId, { SendMessages: false });
-        // Set isClosed state in Firestore (FIX: for reliable deletion check)
-        await setTicket(channel.id, { isClosed: true });
+        
+        // Set isClosed state in Supabase 
+        const updatedData = { isClosed: true };
+        await setTicket(channel.id, updatedData);
         
         await channel.send(`🛑 **Closed:** The ticket has been closed by <@${user.id}>. Only staff can now delete the ticket. The original user (<@${ticketData.userId}>) can no longer reply.`);
         await interaction.editReply('Ticket closed.');
         
+        // Update control message to show 'Delete' button
+        await updateControlMessage(channel, { id: channel.id, ...updatedData });
+        
     } else if (customId === 'delete_ticket') {
         // 1. Ensure the ticket is closed before deletion/transcription
-        // The check now relies on the Firestore state, which is set by the 'close_ticket' action.
         if (!ticketData.isClosed) {
              return interaction.editReply('Please close the ticket first using the "Close" button to prevent user replies during deletion.');
         }
 
-        // 2. Generate Transcript
-        await interaction.editReply('Generating transcript and deleting ticket...');
+        // 2. Generate Transcript and Upload
+        await interaction.editReply('Generating transcript, uploading, and deleting ticket...');
         const htmlTranscript = await createTranscript(channel);
         const logChannel = client.channels.cache.get(LOG_CHANNEL_ID);
         
+        let transcriptUrl = null;
+        let attachmentFile = null;
+
         if (logChannel) {
-            const transcriptBuffer = Buffer.from(htmlTranscript, 'utf-8');
+            // --- UPLOAD TO SUPABASE STORAGE ---
+            transcriptUrl = await uploadTranscriptToStorage(channel.name, htmlTranscript);
+
+            // Always create a local buffer attachment as a safety backup
+            attachmentFile = {
+                attachment: Buffer.from(htmlTranscript, 'utf-8'), 
+                name: `${channel.name}_transcript.html` 
+            };
+            // ----------------------------------------
             
+            const linkUrl = transcriptUrl || 'https://storage-upload-failed.example.com/';
+            const linkLabel = transcriptUrl ? 'View Transcript (Direct Link)' : 'View Transcript (Local File Only)';
+
             const transcriptEmbed = new EmbedBuilder()
                 .setTitle('Ticket Transcript Log')
                 .setDescription(`Ticket #${channel.name} deleted by <@${user.id}>.`)
@@ -796,26 +1108,30 @@ async function handleTicketManagement(interaction) {
                 )
                 .setColor('#2C2F33');
 
-            const linkPlaceholder = 'https://transcript-storage.example.com/' + channel.id; 
             const linkRow = new ActionRowBuilder()
                 .addComponents(
-                    new ButtonBuilder().setURL(linkPlaceholder).setLabel('Direct Link (Example)').setStyle(ButtonStyle.Link),
+                    new ButtonBuilder().setURL(linkUrl).setLabel(linkLabel).setStyle(ButtonStyle.Link),
                 );
             
             await logChannel.send({ 
                 embeds: [transcriptEmbed], 
-                files: [{ attachment: transcriptBuffer, name: `${channel.name}_transcript.html` }],
+                files: attachmentFile ? [attachmentFile] : [],
                 components: [linkRow]
             });
         }
 
         // 3. Robux/Stats Update (Only if claimed)
-        if (ticketData.claimedBy && db) {
-            // Increment completedTickets and Robux in one atomic operation
-            await db.collection(STATS_COLLECTION).doc(ticketData.claimedBy).set({
-                completedTickets: admin.firestore.FieldValue.increment(1),
-                robux: admin.firestore.FieldValue.increment(ROBOT_VALUE_PER_TICKET)
-            }, { merge: true });
+        if (ticketData.claimedBy && ticketData.claimedBy !== 'BOT_INTERACTION' && supabase) {
+            // Fetch current stats to manually increment
+            const currentStats = await getStaffStats(ticketData.claimedBy);
+            
+            const newCompletedTickets = currentStats.completedTickets + 1;
+            const newRobux = currentStats.robux + ROBOT_VALUE_PER_TICKET;
+
+            await updateStaffStats(ticketData.claimedBy, {
+                completedTickets: newCompletedTickets,
+                robux: newRobux
+            });
         }
         
         // 4. Clean up and delete
@@ -830,12 +1146,12 @@ async function handleTicketManagement(interaction) {
 }
 
 
-// --- MESSAGE MONITORING FOR AUTO-UNCLAIM / QUESTIONNAIRE ---
+// --- MESSAGE MONITORING FOR AUTO-UNCLAIM / QUESTIONNAIRE (Same as previous version) ---
 client.on('messageCreate', async message => {
     if (message.author.bot || !message.guild) return;
 
     const channel = message.channel;
-    // Use Firestore function
+    // Use Supabase function
     const ticketData = await getTicket(channel.id);
     if (!ticketData) return; // Not a ticket channel
 
@@ -855,7 +1171,7 @@ client.on('messageCreate', async message => {
     if (!isStaff && message.author.id === ticketData.userId) {
         // User replied to a claimed ticket. Reset the staff's 20-minute timer.
         ticketData.lastUserReplyAt = Date.now();
-        await setTicket(channel.id, ticketData);
+        await setTicket(channel.id, { lastUserReplyAt: ticketData.lastUserReplyAt });
         startUnclaimTimer(channel.id);
         console.log(`Timer reset for ticket ${channel.id}. Staff: ${ticketData.claimedBy}`);
     } else if (isClaimant) {
@@ -868,7 +1184,7 @@ client.on('messageCreate', async message => {
     }
 });
 
-// Check if the token is available before logging in
+// FUCKING CHECKS THE FUCKING TOKEN NIGGA
 if (!TOKEN) {
     console.error("DISCORD_TOKEN environment variable is not set. The bot cannot start.");
 } else {
