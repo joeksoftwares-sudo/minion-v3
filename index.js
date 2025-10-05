@@ -1,7 +1,7 @@
 // Discord Ticket System Bot - Built for Railway.app with In-Memory Storage
 // WARNING: All data in this file will be lost if the bot restarts or redeploys!
 // FIXES: 
-// 1. Critical Fix: Modal label length constraint violation resolved in 'Apply for Media' modal.
+// 1. Critical Fix: Modal label length constraint violation resolved in 'Apply for Media' modal for the SECOND input field.
 // 2. Deprecation Fixes: Replaced 'ready' with 'clientReady', 'isSelectMenu' with 'isStringSelectMenu', and 'ephemeral: true' with 'flags: 64'.
 // 3. Allowed STAFF_ROLE_ID to use the "Finalize & Delete" button.
 
@@ -443,7 +443,7 @@ async function handleSelectMenu(interaction) {
                 .setCustomId('media_application_modal')
                 .setTitle('Media Application Form');
 
-            // CRITICAL FIX: Shortened label to be <= 45 characters (51 chars -> 41 chars)
+            // FIX 1 (From previous step): Shortened label to be <= 45 characters 
             const linkInput = new TextInputBuilder()
                 .setCustomId('platform_link')
                 .setLabel('Link to Content Platform (YouTube, TikTok)') 
@@ -451,9 +451,10 @@ async function handleSelectMenu(interaction) {
                 .setPlaceholder('e.g., youtube.com/@YourChannel')
                 .setRequired(true);
 
+            // FIX 2 (New Fix): Shortened label to be <= 45 characters (was 53 chars)
             const countInput = new TextInputBuilder()
                 .setCustomId('follower_count')
-                .setLabel('Current follower/subscriber count (Number only)')
+                .setLabel('Follower/Subscriber Count (Number Only)')
                 .setStyle(TextInputStyle.Short)
                 .setPlaceholder('e.g., 5000')
                 .setRequired(true);
