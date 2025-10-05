@@ -1,8 +1,11 @@
 // Discord Ticket System Bot Logic (Requires Node.js Environment)
-// This file has been updated to use Supabase (PostgreSQL + Storage) for persistence
-// and now supports multiple ticket types.
+// This file includes:
+// 1. Full Supabase persistence for tickets and transcripts.
+// 2. Multi-ticket type support (Media, General, Exploiter).
+// 3. Auto-unclaim logic for inactive staff.
+// 4. Slash commands (/claim, /close) and button controls.
 
-// --- UPDATED IMPORTS FOR MODALS ---
+// --- IMPORTS ---
 const { 
     Client, 
     GatewayIntentBits, 
@@ -17,17 +20,18 @@ const {
     SlashCommandBuilder,
     ModalBuilder, 
     TextInputBuilder, 
-    TextInputStyle // Required for Modal text inputs
+    TextInputStyle
 } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid'); 
-const fs = require('fs');
+const fs = require('fs'); // Required for future staff stats logging
 
 // --- BOT CONFIGURATION ---
+// IMPORTANT: These environment variables MUST be set correctly in your host environment.
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
-const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID;
-const TICKET_LOG_CHANNEL_ID = process.env.TICKET_LOG_CHANNEL_ID;
+const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID; // The ID of the category where new ticket channels are created
+const TICKET_LOG_CHANNEL_ID = process.env.TICKET_LOG_CHANNEL_ID; // The channel ID where close logs are sent
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const TICKET_PANEL_CHANNEL_ID = process.env.TICKET_PANEL_CHANNEL_ID; // The channel where the ticket button is posted
 const TICKET_LIMIT = 5; // Max number of active tickets a user can have
@@ -44,8 +48,7 @@ const STAFF_STATS_TABLE = 'staff_stats';
 
 if (SUPABASE_URL && SUPABASE_ANON_KEY) {
     try {
-        // CRITICAL FIX: Explicitly set the schema to 'public' to prevent
-        // schema cache issues when columns are updated
+        // CRITICAL FIX: Explicitly set the schema to 'public' for stable operation.
         supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
             db: {
                 schema: 'public', 
@@ -66,7 +69,7 @@ if (SUPABASE_URL && SUPABASE_ANON_KEY) {
  */
 async function setTicket(channelId, data) {
     if (!supabase) {
-        console.error(`FATAL SUPABASE ERROR: Supabase client is null. Cannot set ticket ${channelId}. Check initialization.`);
+        console.error(`FATAL SUPABASE ERROR: Supabase client is null. Cannot set ticket ${channelId}.`);
         return { error: 'Supabase client not initialized' };
     }
     
@@ -110,7 +113,7 @@ async function getTicket(channelId) {
             return null;
         }
 
-        return data; // Returns null if not found (PGRST116) or the data object
+        return data;
     } catch (e) {
         console.error(`RUNTIME ERROR during getTicket for ${channelId}:`, e.message);
         return null;
@@ -142,7 +145,7 @@ async function countActiveTickets(userId) {
 }
 
 
-// --- DISCORD CLIENT INITIALIZATION & COMMANDS (UNCHANGED) ---
+// --- DISCORD CLIENT INITIALIZATION & COMMANDS ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -185,7 +188,8 @@ client.commands.set(closeCommand.name, {
 client.once('clientReady', async () => {
     console.log(`Bot logged in as ${client.user.tag}`);
     await registerSlashCommands();
-    await checkAndPostTicketPanel();
+    // This function ensures the panel is always visible after launch.
+    await checkAndPostTicketPanel(); 
 });
 
 client.on('interactionCreate', async interaction => {
@@ -223,31 +227,40 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('messageCreate', async message => {
-    // ... [AUTO-UNCLAIM LOGIC REMAINS UNCHANGED] ...
     if (!message.inGuild() || message.author.bot) return;
 
     const channel = message.channel;
 
+    // Only process messages in the ticket category
     if (channel.parentId !== TICKET_CATEGORY_ID) return;
 
     const ticketData = await getTicket(channel.id);
-    if (!ticketData) return; 
+    if (!ticketData || ticketData.isClosed) return; 
     
+    // Auto-unclaim logic (only applies if claimed)
     if (!ticketData.claimedBy) return; 
 
     const isStaff = message.member.roles.cache.has(STAFF_ROLE_ID);
     const isClaimant = message.author.id === ticketData.claimedBy;
 
     if (!isStaff && message.author.id === ticketData.userId) {
+        // User replied to a claimed ticket. Reset staff's 20-minute timer.
         const newTimestamp = new Date().toISOString(); 
-        ticketData.lastUserReplyAt = newTimestamp;
         await setTicket(channel.id, { lastUserReplyAt: newTimestamp });
         startUnclaimTimer(channel.id);
-        console.log(`Timer reset for ticket ${channel.id}. Staff: ${ticketData.claimedBy}`);
+        console.log(`Timer reset for ticket ${channel.id}.`);
+
+        // Send a temporary reminder in the channel (optional, but helpful)
+        channel.send(`⏰ Staff timer reset by user reply. <@${ticketData.claimedBy}> has 20 minutes to respond.`).then(m => setTimeout(() => m.delete(), 5000)).catch(() => {});
+
     } else if (isClaimant) {
+        // Claiming staff replied. Clear the timer.
         if (activeTimers.has(channel.id)) {
             clearTimeout(activeTimers.get(channel.id));
             activeTimers.delete(channel.id);
+            console.log(`Timer cleared for ticket ${channel.id}.`);
+            
+            // Optionally remove the timer clear message
             try {
                 const controlMessage = await channel.messages.fetch(ticketData.controlMessageId);
                 const embed = EmbedBuilder.from(controlMessage.embeds[0])
@@ -261,7 +274,7 @@ client.on('messageCreate', async message => {
 });
 
 
-// --- COMMAND HANDLERS (UNCHANGED) ---
+// --- COMMAND HANDLERS (Claim/Close) ---
 
 async function handleClaimCommand(interaction) {
     await interaction.deferReply({ ephemeral: true });
@@ -291,23 +304,25 @@ async function handleClaimCommand(interaction) {
         return interaction.editReply({ content: 'Failed to update database. Claiming failed.', ephemeral: true });
     }
 
+    // Give staff permission to see/send (if they didn't have it explicitly)
     await channel.permissionOverwrites.edit(staffId, {
         ViewChannel: true,
         SendMessages: true
     });
     
+    // Update the control message to show who claimed it
     try {
         const controlMessage = await channel.messages.fetch(ticketData.controlMessageId);
         const embed = EmbedBuilder.from(controlMessage.embeds[0])
             .setDescription(`Ticket claimed by <@${staffId}>.`)
-            .setColor(0x00FF00); 
-        await controlMessage.edit({ embeds: [embed] });
+            .setColor(0x00FF00); // Green color for claimed
+        await controlMessage.edit({ embeds: [embed], components: [controlMessage.components[0]] });
     } catch (e) {
         console.error("Could not edit control message after claim:", e);
     }
 
     await channel.send({ content: `<@${staffId}> has claimed this ticket.` });
-    await interaction.editReply({ content: 'You have successfully claimed the ticket.', ephemeral: true });
+    await interaction.editReply({ content: 'You have successfully claimed the ticket. The auto-unclaim timer is now active.', ephemeral: true });
 
     startUnclaimTimer(channel.id);
 }
@@ -328,17 +343,21 @@ async function handleCloseCommand(interaction) {
         return interaction.editReply({ content: 'This ticket is already closed or does not exist.', ephemeral: true });
     }
 
+    // Permission check: Staff or the original ticket creator can close
     if (!interaction.member.roles.cache.has(STAFF_ROLE_ID) && interaction.user.id !== ticketData.userId) {
         return interaction.editReply({ content: 'You do not have permission to close this ticket.', ephemeral: true });
     }
 
+    // Clear any running unclaim timer
     if (activeTimers.has(channel.id)) {
         clearTimeout(activeTimers.get(channel.id));
         activeTimers.delete(channel.id);
     }
 
+    // 1. Save the transcript to Supabase Storage
     const transcriptUrl = await saveTranscript(channel);
 
+    // 2. Mark as closed in Supabase DB
     const updateResult = await setTicket(channel.id, { 
         isClosed: true, 
         closedAt: new Date().toISOString(),
@@ -352,6 +371,7 @@ async function handleCloseCommand(interaction) {
         await interaction.editReply({ content: 'Ticket closed. Channel will be deleted shortly.', ephemeral: true });
     }
 
+    // 3. Send log message to the designated channel
     const logChannel = await channel.guild.channels.fetch(TICKET_LOG_CHANNEL_ID);
     if (logChannel) {
         const logEmbed = new EmbedBuilder()
@@ -362,19 +382,21 @@ async function handleCloseCommand(interaction) {
                 { name: 'Reason', value: reason || 'N/A', inline: false },
                 { name: 'Transcript', value: transcriptUrl || 'Failed to generate transcript.', inline: false }
             )
-            .setColor(0xFF0000) 
+            .setColor(0xFF0000) // Red color for closed
             .setTimestamp();
         await logChannel.send({ embeds: [logEmbed] });
     }
 
+    // 4. Delete channel after a short delay
     setTimeout(() => {
-        channel.delete('Ticket closed by staff/user.').catch(e => console.error("Failed to delete channel:", e));
+        channel.delete('Ticket closed.').catch(e => console.error("Failed to delete channel:", e));
     }, 5000); 
 }
 
 
-// --- 1. MEDIA APPLICATION TICKET HANDLERS (UNCHANGED) ---
+// --- TICKET TYPE HANDLERS (Modals) ---
 
+// 1. MEDIA APPLICATION
 async function handleMediaTicketButton(interaction) {
     await interaction.deferReply({ ephemeral: true });
 
@@ -428,8 +450,7 @@ async function handleMediaModalSubmit(interaction) {
     await createTicketChannel(interaction, channelName, ticketData);
 }
 
-// --- 2. GENERAL SUPPORT TICKET HANDLERS (NEW) ---
-
+// 2. GENERAL SUPPORT
 async function handleGeneralTicketButton(interaction) {
     await interaction.deferReply({ ephemeral: true });
 
@@ -483,8 +504,7 @@ async function handleGeneralModalSubmit(interaction) {
     await createTicketChannel(interaction, channelName, ticketData);
 }
 
-// --- 3. EXPLOITER REPORT TICKET HANDLERS (NEW PLACEHOLDER) ---
-
+// 3. EXPLOITER REPORT
 async function handleExploiterTicketButton(interaction) {
     await interaction.deferReply({ ephemeral: true });
 
@@ -499,13 +519,13 @@ async function handleExploiterTicketButton(interaction) {
 
     const question1 = new TextInputBuilder()
         .setCustomId('exploiter_q1')
-        .setLabel("Exploiter's Username or ID")
+        .setLabel("Exploiter's Username or ID (or 'Anonymous')")
         .setStyle(TextInputStyle.Short)
         .setRequired(true);
 
     const question2 = new TextInputBuilder()
         .setCustomId('exploiter_q2')
-        .setLabel("Detailed Description of the Exploit (include video proof if possible)")
+        .setLabel("Detailed Description of the Exploit (include video proof link if possible)")
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(true);
 
@@ -565,22 +585,23 @@ async function createTicketChannel(interaction, channelName, ticketData) {
         // 2. Insert into Supabase
         const dbResult = await setTicket(channel.id, ticketData);
         if (dbResult.error) {
+             // Rollback: delete the channel if the DB operation failed.
              await channel.delete('Database insertion failed. Ghost ticket prevention.');
              return interaction.editReply({ content: `❌ Ticket creation failed: Could not save data to the database. The channel was automatically deleted. Please contact a server admin.`, ephemeral: true });
         }
 
         // 3. Construct the initial embed
         const embed = new EmbedBuilder()
-            .setTitle(`New ${ticketData.type.toUpperCase().replace('_', ' ')} Ticket - ${user.tag}`)
+            .setTitle(`New ${ticketData.type.toUpperCase().replace(/_/g, ' ')} Ticket - ${user.tag}`)
             .setDescription('**A staff member will be with you shortly to review your request.**')
             .addFields(
                 { name: 'Applicant', value: `<@${user.id}>`, inline: true },
-                { name: 'Application Type', value: ticketData.type.replace('_', ' ').toUpperCase(), inline: true }
+                { name: 'Application Type', value: ticketData.type.replace(/_/g, ' ').toUpperCase(), inline: true }
             );
 
         // Add Q&A fields dynamically
         for (const [key, value] of Object.entries(ticketData.qna)) {
-            embed.addFields({ name: key, value: value, inline: false });
+            embed.addFields({ name: key, value: value.length > 1024 ? value.substring(0, 1021) + '...' : value, inline: false });
         }
             
         embed.setColor(0x00BFFF) 
@@ -605,7 +626,7 @@ async function createTicketChannel(interaction, channelName, ticketData) {
             components: [row] 
         });
 
-        // 5. Update the ticket data with the control message ID (used for editing later)
+        // 5. Update the ticket data with the control message ID
         await setTicket(channel.id, { controlMessageId: controlMessage.id });
 
         // 6. Final success reply
@@ -627,14 +648,14 @@ async function createTicketChannel(interaction, channelName, ticketData) {
  * Creates or updates the static ticket creation panel in the designated channel.
  */
 async function checkAndPostTicketPanel() {
-    const channel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID);
+    const channel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID).catch(() => null);
     if (!channel) {
         return console.error("TICKET_PANEL_CHANNEL_ID is invalid or bot cannot access it.");
     }
 
     const embed = new EmbedBuilder()
-        .setTitle('🎫 Create a Ticket')
-        .setDescription('Click the button below to start a new application or report.')
+        .setTitle('🎫 Create a Support Ticket')
+        .setDescription('Please select the type of assistance you need below.')
         .setColor(0x007FFF);
 
     const row = new ActionRowBuilder()
@@ -642,14 +663,17 @@ async function checkAndPostTicketPanel() {
             new ButtonBuilder()
                 .setCustomId('create_media_ticket')
                 .setLabel('Media Application')
+                .setEmoji('🎥')
                 .setStyle(ButtonStyle.Primary),
             new ButtonBuilder()
                 .setCustomId('create_general_ticket')
                 .setLabel('General Support')
+                .setEmoji('💬')
                 .setStyle(ButtonStyle.Secondary),
             new ButtonBuilder()
                 .setCustomId('create_exploiter_ticket')
                 .setLabel('Exploiter Report')
+                .setEmoji('⚠️')
                 .setStyle(ButtonStyle.Danger)
         );
 
@@ -658,15 +682,15 @@ async function checkAndPostTicketPanel() {
     const existingMessage = messages.find(m => 
         m.author.id === client.user.id && 
         m.embeds.length > 0 && 
-        m.embeds[0].title === '🎫 Create a Ticket'
+        m.embeds[0].title === '🎫 Create a Support Ticket'
     );
 
     if (existingMessage) {
         await existingMessage.edit({ embeds: [embed], components: [row] });
-        console.log("Ticket panel updated with 3 buttons.");
+        console.log("Ticket panel updated successfully.");
     } else {
         await channel.send({ embeds: [embed], components: [row] });
-        console.log("New ticket panel posted with 3 buttons.");
+        console.log("New ticket panel posted successfully.");
     }
 }
 
@@ -694,11 +718,14 @@ function startUnclaimTimer(channelId) {
         clearTimeout(activeTimers.get(channelId));
     }
     
-    const UNCLAIM_TIMEOUT = 20 * 60 * 1000; 
+    const UNCLAIM_TIMEOUT = 20 * 60 * 1000; // 20 minutes
     
     const timer = setTimeout(async () => {
         const ticketData = await getTicket(channelId);
-        if (!ticketData || !ticketData.claimedBy) return;
+        if (!ticketData || !ticketData.claimedBy || ticketData.isClosed) {
+            activeTimers.delete(channelId);
+            return;
+        }
 
         const channel = await client.channels.fetch(channelId).catch(() => null);
         if (!channel) {
@@ -708,18 +735,20 @@ function startUnclaimTimer(channelId) {
 
         const staffId = ticketData.claimedBy;
 
+        // Unclaim the ticket in the database
         await setTicket(channelId, { claimedBy: null });
         
         await channel.send({
-            content: `<@${staffId}>, the ticket has been automatically unclaimed due to 20 minutes of inactivity since the user's last reply.`,
+            content: `<@&${STAFF_ROLE_ID}> **[AUTO-UNCLAIM]** The ticket has been automatically unclaimed because <@${staffId}> was inactive for 20 minutes after the user's last reply. Please claim to assist.`,
         });
 
+        // Update the control message to show it's unclaimed
         try {
             const controlMessage = await channel.messages.fetch(ticketData.controlMessageId);
             const embed = EmbedBuilder.from(controlMessage.embeds[0])
                 .setDescription(`Ticket is currently **unclaimed**.\nStaff: <@&${STAFF_ROLE_ID}>`)
-                .setColor(0xFF8C00); 
-            await controlMessage.edit({ embeds: [embed] });
+                .setColor(0xFF8C00); // Orange color for unclaimed
+            await controlMessage.edit({ embeds: [embed], components: [controlMessage.components[0]] });
         } catch (e) {
             console.error("Could not edit control message after auto-unclaim:", e);
         }
@@ -730,7 +759,6 @@ function startUnclaimTimer(channelId) {
     }, UNCLAIM_TIMEOUT);
 
     activeTimers.set(channelId, timer);
-    console.log(`Auto-unclaim timer started for ticket ${channelId}.`);
 }
 
 
@@ -741,20 +769,25 @@ async function saveTranscript(channel) {
     if (!supabase) return null;
 
     try {
+        // Fetch up to 100 messages (Discord limit per fetch)
         const messages = await channel.messages.fetch({ limit: 100 }); 
         const transcriptLines = messages
             .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
             .map(msg => `[${msg.createdAt.toISOString()}] ${msg.author.tag}: ${msg.content}`)
             .join('\n');
 
+        const ticketData = await getTicket(channel.id);
+        const ticketType = ticketData?.type.toUpperCase().replace(/_/g, ' ') || 'Unknown';
+
         const transcriptContent = 
-            `--- Transcript for Ticket ${channel.name} (${channel.id}) ---\n` +
+            `--- Transcript for ${ticketType} Ticket ${channel.name} (${channel.id}) ---\n` +
+            `Created By: ${ticketData?.userId} | Closed By: ${ticketData?.closedBy}\n` +
             `Closed At: ${new Date().toISOString()}\n\n` +
             transcriptLines;
 
         const fileName = `transcript-${channel.id}-${Date.now()}.txt`;
         
-        const { data, error } = await supabase.storage
+        const { error } = await supabase.storage
             .from(STORAGE_BUCKET_NAME)
             .upload(fileName, transcriptContent, {
                 contentType: 'text/plain',
