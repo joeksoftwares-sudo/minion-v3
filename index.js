@@ -153,8 +153,9 @@ async function registerSlashCommands(clientId) {
             name: 'payout',
             description: 'Initiate a Robux payout request.',
         },
+        // RENAMED: Changed 'setup-panel' to 'panel'
         {
-            name: 'setup-panel',
+            name: 'panel',
             description: 'ADMIN ONLY: Deploys the persistent ticket panel.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         }
@@ -226,8 +227,8 @@ async function setupTicketPanel() {
 
     const { embed, row } = createTicketPanel();
 
-    // In a real scenario, we use the /setup-panel command, but this ensures the function is called on startup.
-    console.log('Ticket panel generated. Use /setup-panel to deploy it.');
+    // In a real scenario, we use the /panel command, but this ensures the function is called on startup.
+    console.log('Ticket panel generated. Use /panel to deploy it.');
 }
 
 // --- Transcript and Logging Helper ---
@@ -313,7 +314,8 @@ async function handleSlashCommand(interaction) {
     const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
 
     switch (interaction.commandName) {
-        case 'setup-panel':
+        // RENAMED: Changed 'setup-panel' case to 'panel'
+        case 'panel':
             // Check for Administrator permission
             if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
                 return interaction.reply({ content: 'You need Administrator permissions to set up the panel.', ephemeral: true });
