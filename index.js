@@ -54,6 +54,16 @@ const STATS_COLLECTION = 'staff_stats';
 // Map to hold active unclaim timers (key: channelId, value: setTimeout object)
 const activeTimers = new Map();
 
+// --- MEDIA APPLICATION QUESTIONS ---
+// This array defines the questions for the media application flow.
+const MEDIA_QUESTIONS = [
+    { step: 1, prompt: "What is your full YouTube channel link?", key: "youtubeLink" },
+    { step: 2, prompt: "How many subscribers does your main platform currently have?", key: "subscribers" },
+    { step: 3, prompt: "How many average views do your last 5 videos/streams receive?", key: "avgViews" },
+    { step: 4, prompt: "Do you have any prior history with our community (bans, warnings, etc.)? (Please answer Yes/No)", key: "priorHistory" },
+];
+
+
 // --- PERSISTENCE FUNCTIONS (Using Firestore) ---
 
 /**
@@ -211,6 +221,9 @@ async function applyClaimLock(channel, claimedBy) {
     const overwrites = channel.permissionOverwrites.cache.get(STAFF_ROLE_ID);
     if (!overwrites) return; 
 
+    // Skip permission edits if the bot is in control of the ticket
+    if (claimedBy === 'BOT_INTERACTION') return;
+
     if (claimedBy) {
         // 1. Deny SendMessages for the general staff role
         await channel.permissionOverwrites.edit(staffRole, { SendMessages: false });
@@ -224,7 +237,7 @@ async function applyClaimLock(channel, claimedBy) {
         await channel.permissionOverwrites.edit(staffRole, { SendMessages: true });
         // Clean up the individual member overwrite if it exists
         const oldTicketData = await getTicket(channel.id);
-        if (oldTicketData?.claimedBy) {
+        if (oldTicketData?.claimedBy && oldTicketData.claimedBy !== 'BOT_INTERACTION') {
              // Remove the specific override for the previously claimed staff member
              await channel.permissionOverwrites.delete(oldTicketData.claimedBy).catch(() => {}); // Catch error if overwrite already gone
         }
@@ -286,6 +299,73 @@ async function createTranscript(channel) {
 </body>
 </html>
     `;
+}
+
+
+/**
+ * Handles the multi-step questionnaire for media applications.
+ */
+async function handleQuestionnaire(message, ticketData) {
+    const channel = message.channel;
+    const currentStep = ticketData.step || 0;
+    const answeredQuestion = MEDIA_QUESTIONS.find(q => q.step === currentStep);
+
+    if (!answeredQuestion) return; 
+
+    // 1. Save the answer to the current question
+    const newQna = ticketData.qna || {};
+    newQna[answeredQuestion.key] = message.content;
+    
+    // 2. Determine the next step
+    const nextStep = currentStep + 1;
+    const nextQuestion = MEDIA_QUESTIONS.find(q => q.step === nextStep);
+    const totalQuestions = MEDIA_QUESTIONS.length;
+
+    if (nextQuestion) {
+        // Still more questions: Update state and ask the next question
+        await setTicket(channel.id, { step: nextStep, qna: newQna });
+        
+        await channel.send(`✅ Answer received.
+
+**Question ${nextStep}/${totalQuestions}: ${nextQuestion.prompt}**`);
+    } else {
+        // Questionnaire complete: Finalize ticket and unclaim from BOT
+        
+        // Final state update
+        await setTicket(channel.id, { 
+            claimedBy: null, // Unclaim for staff to take over
+            step: 999, // Mark as complete
+            qna: newQna // Save final answer
+        });
+        
+        const controlsRow = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder().setCustomId('claim_ticket').setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🔒'),
+                new ButtonBuilder().setCustomId('close_ticket').setLabel('Close').setStyle(ButtonStyle.Secondary).setEmoji('🛑'),
+                new ButtonBuilder().setCustomId('delete_ticket').setLabel('Delete (Log)').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
+                new ButtonBuilder().setCustomId('unclaim_ticket').setLabel('Unclaim').setStyle(ButtonStyle.Primary).setEmoji('🔓'),
+            );
+            
+        // Compile a summary of answers
+        const summaryEmbed = new EmbedBuilder()
+            .setTitle('Media Application Summary')
+            .setDescription('**Application complete!** Staff can now claim this ticket for review.')
+            .addFields(
+                { name: 'Channel Link', value: newQna.youtubeLink || 'N/A', inline: false },
+                { name: 'Subscribers', value: newQna.subscribers || 'N/A', inline: true },
+                { name: 'Avg. Views (Last 5)', value: newQna.avgViews || 'N/A', inline: true },
+                { name: 'Prior History?', value: newQna.priorHistory || 'N/A', inline: false },
+                { name: '\u200B', value: '\u200B', inline: false },
+            )
+            .setColor('#2ECC71'); 
+
+        // Initial message (now with management buttons)
+        await channel.send({ 
+            content: `🎉 **Questionnaire Complete!** The ticket is now open for <@&${STAFF_ROLE_ID}> to claim and review.`, 
+            embeds: [summaryEmbed], 
+            components: [controlsRow] 
+        });
+    }
 }
 
 
@@ -413,8 +493,10 @@ client.on('interactionCreate', async interaction => {
     const customId = interaction.customId;
 
     if (TICKET_CATEGORIES[customId]) {
+        // This handles the ticket creation buttons on the main panel
         await handleTicketCreation(interaction, customId);
     } else if (customId === 'claim_ticket' || customId === 'close_ticket' || customId === 'delete_ticket' || customId === 'unclaim_ticket') {
+        // This handles the management buttons inside the ticket channel
         await handleTicketManagement(interaction);
     }
 });
@@ -462,15 +544,39 @@ async function handleTicketCreation(interaction, typeId) {
     });
 
     // 2. Store ticket data in database
+    const isMediaTicket = typeId === 'media_apply';
+    let initialClaimedBy = null;
+    let initialStep = 0;
+    
+    // If it's a media ticket, set bot interaction state for the questionnaire flow
+    if (isMediaTicket) {
+        initialClaimedBy = 'BOT_INTERACTION'; 
+        initialStep = 1; 
+    }
+
     await setTicket(channel.id, {
         userId: user.id,
         type: typeId,
-        claimedBy: null,
+        claimedBy: initialClaimedBy, // Set to 'BOT_INTERACTION' if media ticket
         createdAt: Date.now(),
-        lastUserReplyAt: null
+        lastUserReplyAt: null,
+        step: initialStep, // Start at step 1 for media
+        qna: {} // To store answers
     });
 
-    // 3. Send initial message with controls
+    // 3. Update interaction response as requested
+    await interaction.editReply({ content: `✅ **Ticket created!** Redirecting you to the channel: ${channel}` });
+
+    if (isMediaTicket) {
+        // Media flow: Ask first question immediately
+        const firstQuestion = MEDIA_QUESTIONS.find(q => q.step === 1);
+        await channel.send(`👋 Welcome, <@${user.id}>! This is a **Media Application**. To proceed, please answer the following questions.
+
+**Question 1/${MEDIA_QUESTIONS.length}: ${firstQuestion.prompt}**`);
+        return; // Exit here, wait for questionnaire response, don't send management buttons yet.
+    }
+
+    // --- STANDARD TICKET FLOW (If not media) ---
     const controlsRow = new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder().setCustomId('claim_ticket').setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🔒'),
@@ -485,8 +591,12 @@ async function handleTicketCreation(interaction, typeId) {
         .addFields({ name: 'Type', value: ticketType.name, inline: true })
         .setColor('#5865F2');
 
-    await channel.send({ content: `<@&${STAFF_ROLE_ID}>`, embeds: [initialEmbed], components: [controlsRow] });
-    await interaction.editReply({ content: `Your ticket has been opened in ${channel}.` });
+    // Send initial message with controls for standard tickets
+    await channel.send({ 
+        content: `👋 Hey @everyone! <@&${STAFF_ROLE_ID}> A new ticket has been opened by <@${user.id}>.`, 
+        embeds: [initialEmbed], 
+        components: [controlsRow] 
+    });
 }
 
 async function handleTicketManagement(interaction) {
@@ -501,6 +611,11 @@ async function handleTicketManagement(interaction) {
     const ticketData = await getTicket(channel.id);
     if (!ticketData) {
         return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
+    }
+
+    // Prevent staff interaction while the bot is running the questionnaire
+    if (ticketData.claimedBy === 'BOT_INTERACTION') {
+        return interaction.reply({ content: 'The bot is currently running the media application questionnaire. Please wait for the process to complete before claiming.', ephemeral: true });
     }
 
     await interaction.deferReply({ ephemeral: true });
@@ -583,7 +698,7 @@ async function handleTicketManagement(interaction) {
         await deleteTicket(channel.id);
         if (activeTimers.has(channel.id)) {
             clearTimeout(activeTimers.get(channel.id));
-            activeTimers.delete(channel.id);
+            activeTimers.delete(activeTimers.get(channel.id));
         }
         
         setTimeout(() => channel.delete().catch(console.error), 1000); 
@@ -591,14 +706,24 @@ async function handleTicketManagement(interaction) {
 }
 
 
-// --- MESSAGE MONITORING FOR AUTO-UNCLAIM ---
+// --- MESSAGE MONITORING FOR AUTO-UNCLAIM / QUESTIONNAIRE ---
 client.on('messageCreate', async message => {
     if (message.author.bot || !message.guild) return;
 
     const channel = message.channel;
     // Use Firestore function
     const ticketData = await getTicket(channel.id);
-    if (!ticketData || !ticketData.claimedBy) return; // Not a claimed ticket
+    if (!ticketData) return; // Not a ticket channel
+
+    // 1. QUESTIONNAIRE LOGIC
+    // If the bot is controlling the ticket and the message is from the user
+    if (ticketData.claimedBy === 'BOT_INTERACTION' && message.author.id === ticketData.userId) {
+        await handleQuestionnaire(message, ticketData);
+        return; // Stop here, do not run unclaim timer logic
+    }
+    
+    // 2. AUTO-UNCLAIM LOGIC (Only runs if a staff member has claimed the ticket)
+    if (!ticketData.claimedBy || ticketData.claimedBy === 'BOT_INTERACTION') return; // Not a claimed ticket (or bot is handling it)
 
     const isStaff = message.member.roles.cache.has(STAFF_ROLE_ID);
     const isClaimant = message.author.id === ticketData.claimedBy;
