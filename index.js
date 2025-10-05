@@ -168,7 +168,9 @@ client.on('ready', async () => {
     const commands = [
         new SlashCommandBuilder().setName('ticket-panel').setDescription('Sends the aesthetic ticket creation panel.'),
         new SlashCommandBuilder().setName('check-robux').setDescription('Checks your current accumulated Robux earnings.'),
-        new SlashCommandBuilder().setName('payout').setDescription('Initiates a Robux payout request.')
+        new SlashCommandBuilder().setName('payout').setDescription('Initiates a Robux payout request.'),
+        new SlashCommandBuilder().setName('close').setDescription('Closes the current ticket, preventing user replies.'),
+        new SlashCommandBuilder().setName('delete').setDescription('Deletes a closed ticket and saves a transcript.')
     ].map(command => command.toJSON());
 
     const guild = client.guilds.cache.get(GUILD_ID);
@@ -335,7 +337,8 @@ async function handleQuestionnaire(message, ticketData) {
         await setTicket(channel.id, { 
             claimedBy: null, // Unclaim for staff to take over
             step: 999, // Mark as complete
-            qna: newQna // Save final answer
+            qna: newQna, // Save final answer
+            isClosed: false // Ensure it's not marked closed yet
         });
         
         const controlsRow = new ActionRowBuilder()
@@ -383,6 +386,10 @@ client.on('interactionCreate', async interaction => {
             await checkRobuxCommand(interaction);
         } else if (commandName === 'payout') {
             await payoutCommand(interaction);
+        } else if (commandName === 'close') {
+            await closeCommand(interaction);
+        } else if (commandName === 'delete') {
+            await deleteCommand(interaction);
         }
     }
 });
@@ -485,6 +492,119 @@ async function payoutCommand(interaction) {
     }
 }
 
+/**
+ * Handles closing a ticket via the /close slash command.
+ */
+async function closeCommand(interaction) {
+    const { channel, member } = interaction;
+    const userId = interaction.user.id;
+
+    // 1. Staff check
+    if (!member.roles.cache.has(STAFF_ROLE_ID)) {
+        return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
+    }
+
+    // 2. Ticket data check
+    const ticketData = await getTicket(channel.id);
+    if (!ticketData) {
+        return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
+    }
+    
+    // 3. Prevent interaction while bot is running questionnaire
+    if (ticketData.claimedBy === 'BOT_INTERACTION') {
+        return interaction.reply({ content: 'The bot is currently running the media application questionnaire. Please wait for the process to complete.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    // 4. Close the ticket (lock user out)
+    await channel.permissionOverwrites.edit(ticketData.userId, { SendMessages: false });
+    
+    // 5. Set isClosed state in Firestore (FIX for delete issue)
+    await setTicket(channel.id, { isClosed: true });
+
+    await channel.send(`🛑 **Closed:** The ticket has been closed by <@${userId}>. Only staff can now delete the ticket. The original user (<@${ticketData.userId}>) can no longer reply.`);
+    await interaction.editReply('Ticket closed successfully.');
+}
+
+/**
+ * Handles deleting a ticket via the /delete slash command.
+ */
+async function deleteCommand(interaction) {
+    const { channel, member } = interaction;
+    const userId = interaction.user.id;
+
+    // 1. Staff check
+    if (!member.roles.cache.has(STAFF_ROLE_ID)) {
+        return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
+    }
+
+    // 2. Ticket data check
+    let ticketData = await getTicket(channel.id);
+    if (!ticketData) {
+        return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
+    }
+    
+    // 3. Check for closed state using Firestore data (FIX for delete issue)
+    if (!ticketData.isClosed) {
+         return interaction.reply({ content: 'Please close the ticket first using the "Close" button or `/close` command to prevent user replies during deletion.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    
+    // 4. Generate Transcript
+    await interaction.editReply('Generating transcript and deleting ticket...');
+    const htmlTranscript = await createTranscript(channel);
+    const logChannel = client.channels.cache.get(LOG_CHANNEL_ID);
+    
+    if (logChannel) {
+        const transcriptBuffer = Buffer.from(htmlTranscript, 'utf-8');
+        
+        const transcriptEmbed = new EmbedBuilder()
+            .setTitle('Ticket Transcript Log')
+            .setDescription(`Ticket #${channel.name} deleted by <@${userId}>.`)
+            .addFields(
+                { name: 'Ticket User', value: `<@${ticketData.userId}>`, inline: true },
+                { name: 'Category', value: TICKET_CATEGORIES[ticketData.type]?.name || 'Unknown', inline: true }
+            )
+            .setColor('#2C2F33');
+
+        const linkPlaceholder = 'https://transcript-storage.example.com/' + channel.id; 
+        const linkRow = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder().setURL(linkPlaceholder).setLabel('Direct Link (Example)').setStyle(ButtonStyle.Link),
+            );
+        
+        await logChannel.send({ 
+            embeds: [transcriptEmbed], 
+            files: [{ attachment: transcriptBuffer, name: `${channel.name}_transcript.html` }],
+            components: [linkRow]
+        });
+    }
+
+    // 5. Robux/Stats Update (Only if claimed)
+    if (ticketData.claimedBy && ticketData.claimedBy !== 'BOT_INTERACTION' && db) {
+        // Increment completedTickets and Robux in one atomic operation
+        await db.collection(STATS_COLLECTION).doc(ticketData.claimedBy).set({
+            completedTickets: admin.firestore.FieldValue.increment(1),
+            robux: admin.firestore.FieldValue.increment(ROBOT_VALUE_PER_TICKET)
+        }, { merge: true });
+    }
+    
+    // 6. Clean up and delete
+    await deleteTicket(channel.id);
+    if (activeTimers.has(channel.id)) {
+        clearTimeout(activeTimers.get(channel.id));
+        activeTimers.delete(activeTimers.get(channel.id));
+    }
+    
+    // Final reply for ephemeral interaction
+    await interaction.editReply('Ticket deleted and transcript logged.');
+    
+    // Actual channel deletion
+    setTimeout(() => channel.delete().catch(console.error), 1000); 
+}
+
 
 // --- BUTTON INTERACTION HANDLER ---
 client.on('interactionCreate', async interaction => {
@@ -561,7 +681,8 @@ async function handleTicketCreation(interaction, typeId) {
         createdAt: Date.now(),
         lastUserReplyAt: null,
         step: initialStep, // Start at step 1 for media
-        qna: {} // To store answers
+        qna: {}, // To store answers
+        isClosed: false // Initial state: not closed
     });
 
     // 3. Update interaction response as requested
@@ -645,13 +766,16 @@ async function handleTicketManagement(interaction) {
     } else if (customId === 'close_ticket') {
         // Close the ticket (lock user out)
         await channel.permissionOverwrites.edit(ticketData.userId, { SendMessages: false });
+        // Set isClosed state in Firestore (FIX: for reliable deletion check)
+        await setTicket(channel.id, { isClosed: true });
+        
         await channel.send(`🛑 **Closed:** The ticket has been closed by <@${user.id}>. Only staff can now delete the ticket. The original user (<@${ticketData.userId}>) can no longer reply.`);
         await interaction.editReply('Ticket closed.');
         
     } else if (customId === 'delete_ticket') {
         // 1. Ensure the ticket is closed before deletion/transcription
-        const originalUser = channel.guild.members.cache.get(ticketData.userId);
-        if (originalUser && channel.permissionsFor(originalUser).has(PermissionsBitField.Flags.SendMessages)) {
+        // The check now relies on the Firestore state, which is set by the 'close_ticket' action.
+        if (!ticketData.isClosed) {
              return interaction.editReply('Please close the ticket first using the "Close" button to prevent user replies during deletion.');
         }
 
