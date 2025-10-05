@@ -157,6 +157,7 @@ async function getTicket(channelId) {
 
         return data; 
     } catch (e) {
+        // This is the error that the user is encountering when it's not found: 'PGRST116' (no rows found)
         console.error(`Error fetching ticket ${channelId}:`, e.message);
         return null; 
     }
@@ -168,6 +169,7 @@ async function setTicket(channelId, data) {
         
         const updateData = { id: channelId, ...data };
         
+        // This upsert operation is critical for saving the ticket data
         const { error } = await supabase
             .from(TICKET_TABLE)
             .upsert(updateData, { onConflict: 'id' });
@@ -175,6 +177,8 @@ async function setTicket(channelId, data) {
         if (error) throw error;
 
     } catch (e) {
+        // If an insertion fails (e.g., due to schema mismatch), this console.error should be triggered.
+        // The fix addresses the most likely cause: timestamp format mismatch.
         console.error(`Error setting ticket ${channelId}:`, e.message);
     }
 }
@@ -639,7 +643,7 @@ async function payoutCommand(interaction) {
             
         await highStaffChannel.send({ content: `<@&${HIGH_STAFF_ROLE_ID}>`, embeds: [payoutEmbed] });
         
-        await updateStaffStats(userId, { robux: 0, completedTickets: 0, lastPayout: Date.now() }); 
+        await updateStaffStats(userId, { robux: 0, completedTickets: 0, lastPayout: new Date().toISOString() }); // Convert to ISO string
 
         interaction.followUp({ content: '✅ Payout request submitted! A high-ranking staff member will review and process the payout via the gamepass link shortly. Your earnings have been logged and reset for processing.', ephemeral: true });
 
@@ -866,7 +870,8 @@ async function handleMediaModalSubmit(interaction) {
         userId: user.id,
         type: typeId,
         claimedBy: null, // Starts unclaimed for staff to review
-        createdAt: Date.now(),
+        // FIX: Use ISO string for database timestamp compatibility
+        createdAt: new Date().toISOString(),
         lastUserReplyAt: null,
         qna: answers, // Store the final answers
         isClosed: false,
@@ -935,7 +940,7 @@ async function handleTicketCreation(interaction, typeId) {
             .limit(1);
 
         if (error) {
-            console.error('Supabase query error:', error);
+            console.            console.error('Supabase query error:', error);
         } else if (existingTickets && existingTickets.length > 0) {
             const existingTicketChannel = guild.channels.cache.get(existingTickets[0].id);
             if (existingTicketChannel) {
@@ -964,7 +969,8 @@ async function handleTicketCreation(interaction, typeId) {
         userId: user.id,
         type: typeId,
         claimedBy: null, 
-        createdAt: Date.now(),
+        // FIX: Use ISO string for database timestamp compatibility
+        createdAt: new Date().toISOString(),
         lastUserReplyAt: null,
         qna: {}, 
         isClosed: false,
@@ -1069,8 +1075,10 @@ client.on('messageCreate', async message => {
 
     if (!isStaff && message.author.id === ticketData.userId) {
         // User replied to a claimed ticket. Reset the staff's 20-minute timer.
-        ticketData.lastUserReplyAt = Date.now();
-        await setTicket(channel.id, { lastUserReplyAt: ticketData.lastUserReplyAt });
+        // FIX: Ensure timestamp is saved as ISO string for database compatibility
+        const newTimestamp = new Date().toISOString(); 
+        ticketData.lastUserReplyAt = newTimestamp;
+        await setTicket(channel.id, { lastUserReplyAt: newTimestamp });
         startUnclaimTimer(channel.id);
         console.log(`Timer reset for ticket ${channel.id}. Staff: ${ticketData.claimedBy}`);
     } else if (isClaimant) {
