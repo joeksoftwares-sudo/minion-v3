@@ -1,5 +1,5 @@
-// Discord Ticket System Bot - Built for Railway.app with PostgreSQL
-// Requires 'discord.js' and 'pg' packages.
+// Discord Ticket System Bot - Built for Railway.app with In-Memory Storage
+// WARNING: All data in this file will be lost if the bot restarts or redeploys!
 
 const {
     Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder,
@@ -7,12 +7,10 @@ const {
     TextInputStyle, ChannelType, PermissionsBitField, AttachmentBuilder,
     Collection
 } = require('discord.js');
-const { Client: PgClient } = require('pg');
 
 // --- Configuration from Environment Variables ---
-// All these variables MUST be set in your Railway environment!
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const POSTGRES_URL = process.env.POSTGRES_URL; // Railway provides this automatically when linked
+// POSTGRES_URL is no longer needed
 const GUILD_ID = process.env.GUILD_ID;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; 
@@ -35,89 +33,45 @@ const PAYOUT_MIN = 300;
 const PAYOUT_MAX = 700;
 const UNCLAIM_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
-// --- Global State & Cache ---
-// Cache for managing claimed ticket state (since Node.js is single-process)
-const claimedTickets = new Collection();
-// Cache for managing soft-closed state to toggle 'Delete' button dynamically
-const softClosedTickets = new Collection(); 
+// --- Global State & Cache (In-Memory Storage) ---
+// WARNING: All data in these Maps/Arrays will be lost if the bot restarts or redeploys!
 
-// --- Database Setup ---
-const db = new PgClient({
-    connectionString: POSTGRES_URL,
-    ssl: { rejectUnauthorized: false } 
-});
+// Stores { user_id -> { robux_balance: number } }
+const staffData = new Map(); 
+// Stores { channel_id -> { ... ticket data ... } }
+const ticketLogs = new Map(); 
+// Stores transaction history (used for logging only)
+let transactionCounter = 0;
+const transactionLogs = []; 
 
-/**
- * Connects to the database and ensures all required tables exist.
- */
-async function initializeDatabase() {
-    try {
-        await db.connect();
-        console.log('PostgreSQL Connected!');
-
-        // 1. Staff Data Table
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS staff_data (
-                user_id VARCHAR(255) PRIMARY KEY,
-                robux_balance INTEGER DEFAULT 0
-            );
-        `);
-
-        // 2. Ticket Logs Table
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS ticket_logs (
-                ticket_id SERIAL PRIMARY KEY,
-                channel_id VARCHAR(255) UNIQUE NOT NULL,
-                creator_id VARCHAR(255) NOT NULL,
-                ticket_type VARCHAR(50) NOT NULL,
-                start_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                end_time TIMESTAMP WITH TIME ZONE,
-                claimer_id VARCHAR(255),
-                is_claimed BOOLEAN DEFAULT FALSE,
-                is_soft_closed BOOLEAN DEFAULT FALSE,
-                html_transcript_link TEXT
-            );
-        `);
-
-        // 3. Transaction Logs Table
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS transaction_logs (
-                transaction_id SERIAL PRIMARY KEY,
-                staff_id VARCHAR(255) NOT NULL REFERENCES staff_data(user_id),
-                amount_paid INTEGER NOT NULL,
-                transaction_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                gamepass_link TEXT NOT NULL,
-                admin_approver_id VARCHAR(255)
-            );
-        `);
-        console.log('Database tables verified/created successfully.');
-    } catch (error) {
-        console.error('Failed to initialize database:', error.message);
-        process.exit(1);
-    }
-}
+// Cache for managing claimed ticket state (only used for the unclaim timer)
+const claimedTickets = new Collection(); 
 
 /**
- * Updates a staff member's Robux balance. Creates the user record if it doesn't exist.
+ * Updates a staff member's Robux balance (In-Memory). Creates the user record if it doesn't exist.
+ * This function is now synchronous.
  * @param {string} userId The ID of the staff member.
  * @param {number} amount The amount to add (can be negative for payout reset).
  */
-async function updateRobuxBalance(userId, amount) {
-    try {
-        const query = `
-            INSERT INTO staff_data (user_id, robux_balance)
-            VALUES ($1, $2)
-            ON CONFLICT (user_id)
-            DO UPDATE SET robux_balance = staff_data.robux_balance + $2
-            RETURNING robux_balance;
-        `;
-        const result = await db.query(query, [userId, amount]);
-        return result.rows[0].robux_balance;
-    } catch (error) {
-        console.error(`Error updating Robux balance for ${userId}:`, error.message);
-        return null;
-    }
+function updateRobuxBalance(userId, amount) {
+    const data = staffData.get(userId) || { robux_balance: 0 };
+    data.robux_balance += amount;
+    staffData.set(userId, data);
+    return data.robux_balance;
 }
+
+
+/**
+ * Fetches the ticket log data for a channel.
+ * @param {string} channelId 
+ * @returns {object|null} The ticket log object or null if not found/closed.
+ */
+function getActiveTicketLog(channelId) {
+    const log = ticketLogs.get(channelId);
+    // Simulate database check for 'end_time IS NULL'
+    return (log && log.end_time === null) ? log : null;
+}
+
 
 // --- Discord Client Setup ---
 const client = new Client({
@@ -132,7 +86,8 @@ const client = new Client({
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
-    await initializeDatabase();
+    console.log('⚠️ WARNING: Using In-Memory Storage. All data will be lost on bot restart/redeploy.');
+    // initializeDatabase() is removed
     await registerSlashCommands(client.application.id);
     await setupTicketPanel();
 });
@@ -170,7 +125,6 @@ async function registerSlashCommands(clientId) {
     ];
 
     try {
-        // --- CRITICAL CHANGE: Attempt to fetch the guild directly ---
         const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
 
         if (guild) {
@@ -178,7 +132,6 @@ async function registerSlashCommands(clientId) {
             console.log(`✅ Slash commands successfully registered to guild: ${guild.name}`);
         } else {
             console.error(`❌ CRITICAL ERROR: Guild with ID "${GUILD_ID}" not found or bot is not a member. Commands cannot be registered.`);
-            // Optionally, we could register globally here, but guild commands are faster for testing.
         }
     } catch (error) {
         console.error('❌ FATAL Error registering slash commands:', error);
@@ -236,7 +189,6 @@ async function setupTicketPanel() {
     const channel = client.channels.cache.get(TICKET_PANEL_CHANNEL_ID);
     if (!channel) return console.error('Ticket Panel Channel ID not found.');
 
-    // In a real scenario, we use the /panel command, but this ensures the function is called on startup.
     console.log('Ticket panel generated. Use /panel to deploy it.');
 }
 
@@ -252,7 +204,7 @@ function getTicketActionRow(isClaimed, isSoftClosed) {
         .setLabel(isClaimed ? 'Unclaim' : 'Claim')
         .setStyle(ButtonStyle.Primary)
         .setEmoji(isClaimed ? '🔓' : '🔒')
-        .setDisabled(isSoftClosed); // Disable if soft-closed
+        .setDisabled(isSoftClosed); 
 
     let closeOrDeleteButton;
 
@@ -272,20 +224,19 @@ function getTicketActionRow(isClaimed, isSoftClosed) {
             .setEmoji('💾');
     }
 
-    // Admin Delete button (always available, but only works for admins)
     const adminDeleteButton = new ButtonBuilder()
         .setCustomId('ticket_admin_delete')
         .setLabel('Admin Delete')
         .setStyle(ButtonStyle.Danger)
         .setEmoji('❌')
-        .setDisabled(isSoftClosed); // Disable if soft-closed (use Finalize btn)
+        .setDisabled(isSoftClosed); 
 
     const row = new ActionRowBuilder().addComponents(claimButton, closeOrDeleteButton, adminDeleteButton);
     return row;
 }
 
 
-// --- Transcript and Logging Helper ---
+// --- Transcript and Logging Helper (No Change) ---
 
 /**
  * Generates a simple, Discord-styled HTML transcript of a channel's messages.
@@ -379,9 +330,12 @@ async function handleSlashCommand(interaction) {
 
         case 'check-robux':
             if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
+            
             try {
-                const result = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [interaction.user.id]);
-                const balance = result.rows.length > 0 ? result.rows[0].robux_balance : 0;
+                // --- IN-MEMORY BALANCE CHECK ---
+                const data = staffData.get(interaction.user.id);
+                const balance = data ? data.robux_balance : 0;
+                // -------------------------------
 
                 const embed = new EmbedBuilder()
                     .setTitle('💰 Robux Payout Balance')
@@ -535,8 +489,10 @@ async function handlePayoutRequest(interaction) {
     }
 
     try {
-        const balanceResult = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [staffId]);
-        const currentBalance = balanceResult.rows.length > 0 ? balanceResult.rows[0].robux_balance : 0;
+        // --- IN-MEMORY BALANCE CHECK ---
+        const balanceData = staffData.get(staffId);
+        const currentBalance = balanceData ? balanceData.robux_balance : 0;
+        // -------------------------------
 
         if (amount > currentBalance) {
             return interaction.editReply({
@@ -616,11 +572,14 @@ async function createTicketChannel(interaction, ticketType, details = '') {
             return interaction.editReply({ content: 'Ticket category not configured. Please contact an admin.', ephemeral: true });
         }
 
-        const openTicket = await db.query('SELECT channel_id FROM ticket_logs WHERE creator_id = $1 AND end_time IS NULL', [user.id]);
-        if (openTicket.rows.length > 0) {
-            const channelId = openTicket.rows[0].channel_id;
-            return interaction.editReply({ content: `You already have an open ticket: <#${channelId}>.`, ephemeral: true });
+        // --- IN-MEMORY OPEN TICKET CHECK ---
+        const openTicketChannelId = Array.from(ticketLogs.values())
+            .find(log => log.creator_id === user.id && log.end_time === null)?.channel_id;
+
+        if (openTicketChannelId) {
+            return interaction.editReply({ content: `You already have an open ticket: <#${openTicketChannelId}>.`, ephemeral: true });
         }
+        // -----------------------------------
 
 
         // 1. Create Channel
@@ -636,11 +595,18 @@ async function createTicketChannel(interaction, ticketType, details = '') {
             ],
         });
 
-        // 2. Store in Database
-        await db.query(
-            'INSERT INTO ticket_logs (channel_id, creator_id, ticket_type) VALUES ($1, $2, $3)',
-            [channel.id, user.id, ticketType]
-        );
+        // 2. Store in In-Memory Map
+        ticketLogs.set(channel.id, {
+            channel_id: channel.id,
+            creator_id: user.id,
+            ticket_type: ticketType,
+            start_time: new Date(),
+            end_time: null,
+            claimer_id: null,
+            is_claimed: false,
+            is_soft_closed: false,
+            html_transcript_link: null,
+        });
 
         // 3. Send Initial Message with Buttons (UNCLAIMED, NOT SOFT-CLOSED)
         const buttons = getTicketActionRow(false, false);
@@ -694,14 +660,15 @@ async function handleButton(interaction) {
         const channelId = interaction.channel.id;
         const staffId = interaction.user.id;
 
-        const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id, is_claimed, is_soft_closed FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
+        // --- IN-MEMORY TICKET LOG CHECK ---
+        const ticketLog = getActiveTicketLog(channelId);
         
         // Allow ticket_admin_delete to run even if the ticket log is not found (for cleaning up old channels)
-        if (ticketLogResult.rows.length === 0 && customId !== 'ticket_admin_delete') {
+        if (!ticketLog && customId !== 'ticket_admin_delete') {
             return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', ephemeral: true });
         }
         
-        const { claimer_id, is_claimed, is_soft_closed } = ticketLogResult.rows[0] || {};
+        const { claimer_id, is_claimed, is_soft_closed } = ticketLog || {};
         const isCurrentClaimer = claimer_id === staffId;
 
 
@@ -773,13 +740,16 @@ client.on('messageCreate', async message => {
 
     if (!ticketInfo) return; 
 
-    const ticketLog = await db.query('SELECT creator_id, is_soft_closed FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
-    if (ticketLog.rows.length === 0 || ticketLog.rows[0].is_soft_closed) {
+    // --- IN-MEMORY TICKET LOG CHECK ---
+    const ticketLog = getActiveTicketLog(channelId);
+    
+    if (!ticketLog || ticketLog.is_soft_closed) {
         claimedTickets.delete(channelId); 
         return;
     }
+    // -----------------------------------
 
-    const creatorId = ticketLog.rows[0].creator_id;
+    const creatorId = ticketLog.creator_id;
     const claimerId = ticketInfo.claimerId;
 
     // Case 1: Message is from the TICKET CREATOR -> START UNCLAIM TIMER
@@ -799,7 +769,7 @@ client.on('messageCreate', async message => {
 
 
 /**
- * Unclaims a ticket, resetting permissions and database state, and updating the message buttons.
+ * Unclaims a ticket, resetting permissions and in-memory state, and updating the message buttons.
  * @param {Guild} guild The guild object.
  * @param {string} channelId The channel ID to unclaim.
  * @param {string} initialMessageId ID of the message to update buttons on.
@@ -816,13 +786,14 @@ async function unclaimTicket(guild, channelId, initialMessageId) {
     // 2. Reset Permissions (restore send permissions for @Staff)
     try {
         await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: true });
-        // NOTE: Permissions are generally handled by the main STAFF_ROLE_ID setting 
 
-        // 3. Update DB
-        await db.query(
-            'UPDATE ticket_logs SET is_claimed = FALSE, claimer_id = NULL WHERE channel_id = $1 AND end_time IS NULL',
-            [channelId]
-        );
+        // 3. Update In-Memory Ticket Log
+        const log = getActiveTicketLog(channelId);
+        if (log) {
+            log.is_claimed = false;
+            log.claimer_id = null;
+            ticketLogs.set(channelId, log);
+        }
 
         // 4. Update Channel Topic (Remove claimer info)
         await channel.setTopic((channel.topic || '').replace(/🔒 Claimed by: .*$/i, ''));
@@ -830,9 +801,7 @@ async function unclaimTicket(guild, channelId, initialMessageId) {
         // 5. Update Buttons
         const initialMessage = await channel.messages.fetch(initialMessageId).catch(() => null);
         if (initialMessage) {
-            // Check soft closed status from cache or fresh lookup
-            const isSoftClosed = softClosedTickets.has(channelId);
-            const newRow = getTicketActionRow(false, isSoftClosed); // isClaimed: false
+            const newRow = getTicketActionRow(false, log ? log.is_soft_closed : false); // isClaimed: false
             await initialMessage.edit({ components: [newRow] });
         }
 
@@ -849,6 +818,8 @@ async function unclaimTicket(guild, channelId, initialMessageId) {
  */
 async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaimed, isCurrentClaimer, claimer_id) {
     const channel = interaction.channel;
+    const log = getActiveTicketLog(channelId);
+    if (!log) return interaction.editReply({ content: 'Ticket log not found for this channel.', ephemeral: true });
 
     if (isClaimed) {
         // UNCLAIM LOGIC
@@ -861,11 +832,10 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
         }
     } else {
         // CLAIM LOGIC
-        // 1. Claim the ticket
-        await db.query(
-            'UPDATE ticket_logs SET is_claimed = TRUE, claimer_id = $1 WHERE channel_id = $2 AND end_time IS NULL',
-            [staffId, channelId]
-        );
+        // 1. Claim the ticket (Update In-Memory Log)
+        log.is_claimed = true;
+        log.claimer_id = staffId;
+        ticketLogs.set(channelId, log);
 
         // 2. Update Channel Topic & Permissions (Deny SendMessages for other staff)
         await channel.setTopic(`🔒 Claimed by: ${interaction.user.tag} (${staffId})`);
@@ -880,8 +850,7 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
         claimedTickets.set(channelId, { claimerId: staffId, timeoutId: null });
         
         // 4. Update Buttons (Claim -> Unclaim)
-        const isSoftClosed = softClosedTickets.has(channelId);
-        const newRow = getTicketActionRow(true, isSoftClosed); // isClaimed: true
+        const newRow = getTicketActionRow(true, log.is_soft_closed); // isClaimed: true
         await interaction.message.edit({ components: [newRow] });
 
         await interaction.editReply({ content: '✅ You have **claimed** this ticket. Other staff members cannot type here until you unclaim it.', ephemeral: true });
@@ -900,13 +869,14 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
  * @param {boolean} isSlashCommand - True if triggered by /close-ticket.
  */
 async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashCommand) {
-    const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id, is_soft_closed FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
+    // --- IN-MEMORY TICKET LOG CHECK ---
+    const log = getActiveTicketLog(channelId);
 
-    if (ticketLogResult.rows.length === 0) {
+    if (!log) {
         return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', ephemeral: true });
     }
 
-    const { creator_id, ticket_type, claimer_id, is_soft_closed } = ticketLogResult.rows[0];
+    const { creator_id, ticket_type, claimer_id, is_soft_closed } = log;
 
     if (is_soft_closed) {
         return interaction.editReply({ content: 'This ticket is already soft-closed. Use the **Finalize & Delete** button to complete the process.', ephemeral: true });
@@ -914,7 +884,6 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
 
     // 1. Unclaim just in case and remove from cache
     if (claimedTickets.has(channelId)) {
-        // Use interaction.message.id if it's a button interaction, otherwise we need to fetch the pinned message
         const initialMessageId = interaction.message ? interaction.message.id : (await interaction.channel.messages.fetchPinned()).first()?.id;
         if (initialMessageId) {
             await unclaimTicket(interaction.guild, channelId, initialMessageId);
@@ -923,17 +892,13 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
     
     const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
 
-    // 2. Add Robux and Log Close
-    await db.query(
-        // Set is_soft_closed to true, but DON'T set end_time yet, as end_time means deletion is complete.
-        'UPDATE ticket_logs SET is_soft_closed = TRUE WHERE channel_id = $1', 
-        [channelId]
-    );
-    const newBalance = await updateRobuxBalance(staffId, robuxValue);
-    softClosedTickets.set(channelId, true);
+    // 2. Add Robux and Log Close (Update In-Memory Log)
+    log.is_soft_closed = true;
+    ticketLogs.set(channelId, log); // Store updated log
+
+    const newBalance = updateRobuxBalance(staffId, robuxValue);
 
     // 3. Update Buttons (Close -> Finalize & Delete)
-    // Find the initial message to update its components
     const initialMessage = interaction.message || (await interaction.channel.messages.fetchPinned()).first();
 
     if (initialMessage) {
@@ -962,7 +927,7 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
 // --- Hard Delete (Transcript + Delete Channel) Logic ---
 
 /**
- * Handles the hard delete action (transcript, database update, channel delete).
+ * Handles the hard delete action (transcript, in-memory update, channel delete).
  * @param {Interaction} interaction - The button/slash command interaction.
  * @param {string} channelId
  * @param {string} staffId
@@ -972,30 +937,23 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
     const channel = interaction.channel;
     const isFinalizeDelete = interaction.customId === 'ticket_finalize_delete';
     
-    let ticketLogResult;
-    
-    // Admins can force delete (ticket_admin_delete) even if soft-closed flag isn't set (end_time IS NULL)
-    // Finalize delete (ticket_finalize_delete) is used after soft-close (is_soft_closed = TRUE)
-    if (isFinalizeDelete) {
-        ticketLogResult = await db.query('SELECT creator_id, ticket_type FROM ticket_logs WHERE channel_id = $1 AND is_soft_closed = TRUE AND end_time IS NULL', [channelId]);
-    } else {
-        // Admin delete bypasses soft-closed check and is intended for cleanup of *active* or *stuck* tickets
-        ticketLogResult = await db.query('SELECT creator_id, ticket_type FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
-    }
+    // --- IN-MEMORY TICKET LOG CHECK ---
+    const log = getActiveTicketLog(channelId);
 
-    if (ticketLogResult.rows.length === 0) {
+    // Check logic: 
+    // - Finalize Delete needs a log entry where is_soft_closed is TRUE
+    // - Admin Delete needs any active log entry (or proceeds if none found for channel cleanup)
+    if (!log || (isFinalizeDelete && !log.is_soft_closed)) {
         return interaction.editReply({ content: 'This ticket cannot be finalized or deleted right now. Check if it has been soft-closed/finalized already or contact an admin.', ephemeral: true });
     }
     
-    const { creator_id, ticket_type } = ticketLogResult.rows[0];
+    const { creator_id, ticket_type } = log;
     
     // 1. Clean up cache
     claimedTickets.delete(channelId);
-    softClosedTickets.delete(channelId);
 
     // 2. Fetch all messages for transcript
     const creator = await interaction.guild.members.fetch(creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
-    // Fetch up to 200 messages for a more complete transcript
     const messages = await channel.messages.fetch({ limit: 200 }); 
     const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
     const htmlContent = generateHtmlTranscript(sortedMessages, creator);
@@ -1020,17 +978,14 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
         );
         await logMessage.edit({ components: [linkRow] });
 
-        // 5. Update DB (Finalize end_time and link. This marks the ticket as officially closed)
-        await db.query(
-            'UPDATE ticket_logs SET html_transcript_link = $2, end_time = CURRENT_TIMESTAMP WHERE channel_id = $1',
-            [channelId, transcriptUrl]
-        );
+        // 5. Update In-Memory Log (Finalize end_time and link. This marks the ticket as officially closed)
+        log.html_transcript_link = transcriptUrl;
+        log.end_time = new Date();
+        ticketLogs.set(channelId, log); // Store finalized log
     } else {
-        // If log channel is missing, still mark as deleted in DB for cleanup
-        await db.query(
-            'UPDATE ticket_logs SET end_time = CURRENT_TIMESTAMP WHERE channel_id = $1',
-            [channelId]
-        );
+        // If log channel is missing, still mark as deleted in memory
+        log.end_time = new Date();
+        ticketLogs.set(channelId, log);
         await interaction.editReply({ content: '❌ Transcript log channel not found. Deleting ticket without logging.', ephemeral: true });
     }
 
@@ -1046,6 +1001,7 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
     // 7. Delete Channel
     setTimeout(() => {
         channel.delete('Ticket finalized and deleted by staff.').catch(err => console.error('Error deleting channel:', err));
+        ticketLogs.delete(channelId); // Clean up the map after deletion
     }, 5000);
 }
 
@@ -1085,23 +1041,29 @@ async function handlePayoutApproval(interaction, action, args) {
 
     // Approval Logic
     try {
-        const balanceResult = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [staffId]);
-        const currentBalance = balanceResult.rows.length > 0 ? balanceResult.rows[0].robux_balance : 0;
+        // --- IN-MEMORY BALANCE CHECK ---
+        const balanceData = staffData.get(staffId);
+        const currentBalance = balanceData ? balanceData.robux_balance : 0;
+        // -------------------------------
 
         if (currentBalance < amount) {
             return interaction.editReply({ content: `⚠️ Cannot approve. Staff member's balance (**${currentBalance} R$**) is now less than the requested amount (**${amount} R$**). Request rejected.` });
         }
 
-        // 2. Reset Balance and Log Transaction (using negative amount in updateRobuxBalance)
-        await updateRobuxBalance(staffId, -amount);
+        // 2. Reset Balance (using negative amount in updateRobuxBalance)
+        updateRobuxBalance(staffId, -amount);
 
-        // 3. Log the successful transaction
+        // 3. Log the successful transaction (In-Memory)
         const gamepassLink = interaction.message.embeds[0].fields.find(f => f.name === 'Gamepass Link')?.value || 'N/A';
-
-        await db.query(
-            'INSERT INTO transaction_logs (staff_id, amount_paid, gamepass_link, admin_approver_id) VALUES ($1, $2, $3, $4)',
-            [staffId, amount, gamepassLink, approverId]
-        );
+        transactionCounter++;
+        transactionLogs.push({
+            transaction_id: transactionCounter,
+            staff_id: staffId,
+            amount_paid: amount,
+            transaction_date: new Date(),
+            gamepass_link: gamepassLink,
+            admin_approver_id: approverId
+        });
 
         // 4. Notify Staff Member
         const staffMember = await client.users.fetch(staffId);
@@ -1114,7 +1076,7 @@ async function handlePayoutApproval(interaction, action, args) {
 
     } catch (error) {
         console.error('Error during payout approval:', error);
-        await updateRobuxBalance(staffId, amount); // CRITICAL: Rollback balance if transaction fails
+        updateRobuxBalance(staffId, amount); // CRITICAL: Rollback balance if transaction fails
         await interaction.editReply({ content: '❌ A critical error occurred during approval and transaction logging. Balance has been potentially rolled back. Check logs immediately.' });
     }
 }
