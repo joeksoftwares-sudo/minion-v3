@@ -4,6 +4,7 @@
 // 2. Multi-ticket type support (Media, General, Exploiter).
 // 3. Auto-unclaim logic for inactive staff.
 // 4. Slash commands (/claim, /close) and button controls.
+// 5. CRITICAL FIX: Ensures the ticket panel is posted upon bot launch.
 
 // --- IMPORTS ---
 const { 
@@ -24,16 +25,15 @@ const {
 } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid'); 
-const fs = require('fs'); // Required for future staff stats logging
+const fs = require('fs');
 
-// --- BOT CONFIGURATION ---
-// IMPORTANT: These environment variables MUST be set correctly in your host environment.
+// --- BOT CONFIGURATION (Ensure these Environment Variables are set!) ---
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
-const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID; // The ID of the category where new ticket channels are created
-const TICKET_LOG_CHANNEL_ID = process.env.TICKET_LOG_CHANNEL_ID; // The channel ID where close logs are sent
+const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID; 
+const TICKET_LOG_CHANNEL_ID = process.env.TICKET_LOG_CHANNEL_ID; 
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
-const TICKET_PANEL_CHANNEL_ID = process.env.TICKET_PANEL_CHANNEL_ID; // The channel where the ticket button is posted
+const TICKET_PANEL_CHANNEL_ID = process.env.TICKET_PANEL_CHANNEL_ID; 
 const TICKET_LIMIT = 5; // Max number of active tickets a user can have
 
 const activeTimers = new Collection(); // Channel ID -> Timeout object
@@ -188,7 +188,7 @@ client.commands.set(closeCommand.name, {
 client.once('clientReady', async () => {
     console.log(`Bot logged in as ${client.user.tag}`);
     await registerSlashCommands();
-    // This function ensures the panel is always visible after launch.
+    // CRITICAL FIX: This function ensures the panel is always visible after launch.
     await checkAndPostTicketPanel(); 
 });
 
@@ -612,10 +612,12 @@ async function createTicketChannel(interaction, channelName, ticketData) {
                 new ButtonBuilder()
                     .setCustomId('claim_ticket')
                     .setLabel('Claim Ticket')
+                    .setEmoji('✋')
                     .setStyle(ButtonStyle.Success),
                 new ButtonBuilder()
                     .setCustomId('close_ticket')
                     .setLabel('Close Ticket')
+                    .setEmoji('🔒')
                     .setStyle(ButtonStyle.Danger)
             );
 
@@ -646,6 +648,7 @@ async function createTicketChannel(interaction, channelName, ticketData) {
 
 /**
  * Creates or updates the static ticket creation panel in the designated channel.
+ * This is the function that ensures the panel is visible on launch.
  */
 async function checkAndPostTicketPanel() {
     const channel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID).catch(() => null);
