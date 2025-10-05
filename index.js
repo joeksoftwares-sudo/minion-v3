@@ -1,5 +1,5 @@
 // Discord Ticket System Bot Logic (Node.js)
-// Features: Multi-Type Tickets, Supabase Persistence, Auto-Unclaim Timer, Panel Recovery.
+// Features: Multi-Type Tickets, Supabase Persistence, Auto-Unclaim Timer, Manual /panel Command.
 
 // --- 1. IMPORTS AND DEPENDENCIES ---
 const { 
@@ -27,7 +27,6 @@ const GUILD_ID = process.env.GUILD_ID; // Guild where commands and channels are 
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID; // Parent category for new tickets
 const TICKET_LOG_CHANNEL_ID = process.env.TICKET_LOG_CHANNEL_ID; // Channel for transcript links
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID; // Role that can claim/close tickets
-const TICKET_PANEL_CHANNEL_ID = process.env.TICKET_PANEL_CHANNEL_ID; // Channel where the panel message lives
 
 // Constants
 const TICKET_TABLE = 'tickets'; 
@@ -151,6 +150,11 @@ const client = new Client({
 client.commands = new Collection();
 
 // Slash Command Definitions
+const panelCommand = new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Posts the main ticket creation panel in the current channel.')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator); // Admin-only
+
 const claimCommand = new SlashCommandBuilder()
     .setName('claim')
     .setDescription('Claims the current ticket for a staff member.')
@@ -165,6 +169,7 @@ const closeCommand = new SlashCommandBuilder()
             .setDescription('The reason for closing the ticket.')
             .setRequired(false));
 
+client.commands.set(panelCommand.name, { data: panelCommand, execute: handlePanelCommand });
 client.commands.set(claimCommand.name, { data: claimCommand, execute: handleClaimCommand });
 client.commands.set(closeCommand.name, { data: closeCommand, execute: handleCloseCommand });
 
@@ -174,8 +179,8 @@ client.commands.set(closeCommand.name, { data: closeCommand, execute: handleClos
 client.once('ready', async () => {
     console.log(`Bot logged in as ${client.user.tag}`);
     await registerSlashCommands();
-    // GUARANTEE PANEL PRESENCE: Checks if the panel exists and posts it if missing.
-    await checkAndPostTicketPanel(); 
+    // Removed: The old checkAndPostTicketPanel() logic is now gone. 
+    // The panel must be posted manually using /panel.
 });
 
 client.on('interactionCreate', async interaction => {
@@ -246,17 +251,12 @@ client.on('messageCreate', async message => {
 });
 
 
-// --- 7. TICKET PANEL MANAGEMENT ---
+// --- 7. TICKET PANEL MANAGEMENT (/panel command handler) ---
 
 /**
- * Ensures the ticket panel message is present in the designated channel.
+ * Creates the embed and action row components for the ticket panel.
  */
-async function checkAndPostTicketPanel() {
-    const channel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID).catch(() => null);
-    if (!channel) {
-        return console.error("[CONFIG ERROR] TICKET_PANEL_CHANNEL_ID is invalid or bot cannot access it. Please verify the ID and bot permissions.");
-    }
-
+function createPanelComponentsAndEmbed() {
     const embed = new EmbedBuilder()
         .setTitle('🎫 Discord Support & Application Center')
         .setDescription('Please select the appropriate button below to open a ticket. **Only 1 active ticket per person allowed.**')
@@ -277,25 +277,46 @@ async function checkAndPostTicketPanel() {
                 .setLabel('⚠️ Exploiter Report')
                 .setStyle(ButtonStyle.Danger)
         );
+    
+    return { embed, row };
+}
 
-    // Try to find and edit the existing panel message
+/**
+ * Posts the ticket panel message to a specific channel.
+ */
+async function postTicketPanelMessage(channel) {
+    if (!channel) return false;
+    
     try {
-        const messages = await channel.messages.fetch({ limit: 5 });
-        const existingMessage = messages.find(m => 
-            m.author.id === client.user.id && 
-            m.embeds.length > 0 && 
-            m.embeds[0].title.includes('Support & Application Center')
-        );
-
-        if (existingMessage) {
-            await existingMessage.edit({ embeds: [embed], components: [row] });
-            console.log("[Panel] Ticket panel updated successfully.");
-        } else {
-            await channel.send({ embeds: [embed], components: [row] });
-            console.log("[Panel] New ticket panel posted successfully.");
-        }
+        const { embed, row } = createPanelComponentsAndEmbed();
+        await channel.send({ embeds: [embed], components: [row] });
+        console.log(`[Panel] New ticket panel posted successfully in #${channel.name}.`);
+        return true;
     } catch (e) {
-        console.error("[Panel] Error posting or updating panel:", e);
+        console.error("[Panel] Error posting panel:", e);
+        return false;
+    }
+}
+
+/**
+ * Handler for the /panel slash command.
+ */
+async function handlePanelCommand(interaction) {
+    if (!interaction.inGuild()) return;
+
+    // Check for administrator permission (already defined in command setup, but good practice to double check)
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: 'You must be an administrator to use the `/panel` command.', ephemeral: true });
+    }
+    
+    await interaction.deferReply({ ephemeral: true });
+    
+    const success = await postTicketPanelMessage(interaction.channel);
+
+    if (success) {
+        await interaction.editReply({ content: '✅ Ticket panel successfully posted in this channel.', ephemeral: true });
+    } else {
+        await interaction.editReply({ content: '❌ Failed to post the ticket panel. Check the bot\'s permissions in this channel or the console for errors.', ephemeral: true });
     }
 }
 
