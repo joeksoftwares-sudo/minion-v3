@@ -53,7 +53,7 @@ const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const TICKET_CATEGORIES = {
     'media_apply': { name: 'Apply for Media', categoryId: process.env.MEDIA_CATEGORY_ID },
     'report_exploit': { name: 'Report Exploiters', categoryId: process.env.EXPLOIT_CATEGORY_ID },
-    'general_support': { name: 'General Support', categoryId: process.env.GENERAL_SUPPORT_CATEGORY_ID }
+    'general_support': { name: 'General Support', categoryId: processs.env.GENERAL_SUPPORT_CATEGORY_ID }
 };
 
 const ROBOT_VALUE_PER_TICKET = 15;
@@ -562,7 +562,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 // --- COMMAND IMPLEMENTATIONS (No major changes) ---
-// ... (sendTicketPanel, checkRobuxCommand, payoutCommand, closeCommand, deleteCommand remain the same or minor adjustments for removed BOT_INTERACTION check) ...
+// ... (sendTicketPanel, checkRobuxCommand, payoutCommand remain the same) ...
 
 async function sendTicketPanel(interaction) {
     const panelEmbed = new EmbedBuilder()
@@ -662,7 +662,8 @@ async function closeCommand(interaction) {
 
     const ticketData = await getTicket(channel.id);
     if (!ticketData) {
-        return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
+        // FIX: Removed the specific database error message
+        return interaction.reply({ content: '❌ This command failed because this channel is not a valid ticket.', ephemeral: true });
     }
     
     await interaction.deferReply({ ephemeral: true });
@@ -688,7 +689,8 @@ async function deleteCommand(interaction) {
 
     let ticketData = await getTicket(channel.id);
     if (!ticketData) {
-        return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
+        // FIX: Removed the specific database error message
+        return interaction.reply({ content: '❌ This command failed because this channel is not a valid ticket.', ephemeral: true });
     }
     
     if (!ticketData.isClosed) {
@@ -751,7 +753,7 @@ async function deleteCommand(interaction) {
     await deleteTicket(channel.id);
     if (activeTimers.has(channel.id)) {
         clearTimeout(activeTimers.get(channel.id));
-        activeTimers.delete(channel.id); // <--- FIX APPLIED HERE
+        activeTimers.delete(channel.id); 
     }
     
     await interaction.editReply('Ticket deleted, transcript uploaded, and log sent.');
@@ -940,7 +942,7 @@ async function handleTicketCreation(interaction, typeId) {
             .limit(1);
 
         if (error) {
-            console.            console.error('Supabase query error:', error);
+            console.error('Supabase query error:', error);
         } else if (existingTickets && existingTickets.length > 0) {
             const existingTicketChannel = guild.channels.cache.get(existingTickets[0].id);
             if (existingTicketChannel) {
@@ -1006,7 +1008,8 @@ async function handleTicketManagement(interaction) {
 
     const ticketData = await getTicket(channel.id);
     if (!ticketData) {
-        return interaction.reply({ content: 'This channel is not an active ticket channel in the database.', ephemeral: true });
+        // FIX: Removed the specific database error message
+        return interaction.reply({ content: '❌ This action failed because this channel is not a valid ticket.', ephemeral: true });
     }
 
     await interaction.deferReply({ ephemeral: true });
@@ -1085,7 +1088,7 @@ client.on('messageCreate', async message => {
         // Claiming staff replied. If a timer was running, clear it.
         if (activeTimers.has(channel.id)) {
             clearTimeout(activeTimers.get(channel.id));
-            activeTimers.delete(channel.id); // <--- FIX APPLIED HERE
+            activeTimers.delete(channel.id);
             await channel.send('✅ Staff reply received. Auto-unclaim timer cleared.');
         }
     }
