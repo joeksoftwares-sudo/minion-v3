@@ -1,9 +1,13 @@
 // Discord Ticket System Bot - Built for Railway.app with In-Memory Storage
 // WARNING: All data in this file will be lost if the bot restarts or redeploys!
+// FIXES: 
+// 1. Media Ticket "Interaction Failed" by replacing deprecated SelectMenuBuilder with StringSelectMenuBuilder.
+// 2. Resolved "limit[NUMBER_TYPE_MAX]" API error by setting message fetch limit to 100.
+// 3. Allowed STAFF_ROLE_ID to use the "Finalize & Delete" button.
 
 const {
     Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder,
-    SelectMenuBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder,
+    StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder,
     TextInputStyle, ChannelType, PermissionsBitField, AttachmentBuilder,
     Collection
 } = require('discord.js');
@@ -87,7 +91,6 @@ const client = new Client({
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     console.log('⚠️ WARNING: Using In-Memory Storage. All data will be lost on bot restart/redeploy.');
-    // initializeDatabase() is removed
     await registerSlashCommands(client.application.id);
     await setupTicketPanel();
 });
@@ -153,7 +156,8 @@ function createTicketPanel() {
         .setFooter({ text: 'Powered by the Bot Team' })
         .setTimestamp();
 
-    const selectMenu = new SelectMenuBuilder()
+    // FIX: Using StringSelectMenuBuilder to resolve deprecation warning and prevent interaction failures
+    const selectMenu = new StringSelectMenuBuilder()
         .setCustomId('select_ticket_type')
         .setPlaceholder('Select a Ticket Category...')
         .addOptions([
@@ -448,6 +452,7 @@ async function handleSelectMenu(interaction) {
                 new ActionRowBuilder().addComponents(planInput)
             );
 
+            // This is the point of interaction. It should work now with StringSelectMenuBuilder
             return interaction.showModal(modal);
         }
 
@@ -468,6 +473,7 @@ async function handleModalSubmit(interaction) {
     try {
         if (interaction.customId === 'media_application_modal') {
             await interaction.deferReply({ ephemeral: true });
+            
             const link = interaction.fields.getTextInputValue('platform_link');
             const count = interaction.fields.getTextInputValue('follower_count');
             const plan = interaction.fields.getTextInputValue('content_plan');
@@ -478,13 +484,20 @@ async function handleModalSubmit(interaction) {
                 **Content Plan:**\n${plan}
             `;
 
+            // If an error happens inside createTicketChannel, it will be caught here and logged.
             await createTicketChannel(interaction, 'Apply for Media', details);
         } else if (interaction.customId === 'payout_modal') {
             await handlePayoutRequest(interaction);
         }
     } catch (error) {
          console.error('Error processing modal submission:', error);
-        await interaction.editReply({ content: '❌ An unexpected internal error occurred during form submission. Check the bot logs for details.', ephemeral: true });
+         let errorMessage = '❌ An unexpected internal error occurred during form submission. Check the bot logs for details.';
+         
+         if (error.code === 50013) {
+             errorMessage = '❌ Channel Creation Failed: The bot is missing Discord permissions (Manage Channels) to create the ticket channel.';
+         }
+         
+        await interaction.editReply({ content: errorMessage, ephemeral: true });
     }
 }
 
@@ -656,13 +669,13 @@ async function createTicketChannel(interaction, ticketType, details = '') {
         await interaction.editReply({ content: `✅ Your **${ticketType}** ticket has been created! Go to ${channel.toString()}` });
 
     } catch (error) {
-        console.error('Error creating ticket channel:', error);
-        // Check if error is due to missing permissions for channel creation
+        // Explicit error handling for permissions during channel creation
         if (error.code === 50013) {
-             await interaction.editReply({ content: '❌ The bot is missing permissions to **create channels** or **set up permissions** in the server. Please check the bot\'s role permissions.', ephemeral: true });
-        } else {
-             await interaction.editReply({ content: '❌ An unexpected error occurred while creating your ticket. Check the bot logs for details.', ephemeral: true });
+             console.error('Channel Creation Failed: Missing Permissions (Manage Channels).');
+             throw { code: 50013, message: 'Missing Discord permissions to create the channel.' };
         }
+        console.error('Error creating ticket channel:', error);
+        throw error;
     }
 }
 
@@ -686,6 +699,7 @@ async function handleButton(interaction) {
 
     try {
         if (customId.startsWith('ticket_')) {
+            // Check for general staff access on all ticket buttons
             if (!isStaff && customId !== 'ticket_admin_delete') return interaction.editReply({ content: 'You must be a staff member to perform ticket actions.', ephemeral: true });
 
             const channelId = interaction.channel.id;
@@ -1047,7 +1061,7 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
 
         // 2. Fetch all messages for transcript
         const creator = await interaction.guild.members.fetch(log.creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
-        // FIX: The Discord API limit for messages per fetch is 100.
+        // FIX: Discord API limit is 100 messages per fetch.
         const messages = await channel.messages.fetch({ limit: 100 }); 
         const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
         const htmlContent = generateHtmlTranscript(sortedMessages, creator);
