@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "discord.js": "^14.15.3",
-    "@supabase/supabase-js": "^2.43.4"
+    "@supabase/supabase-js": "^2.43.4",
+    "uuid": "^9.0.1"
   }
 }
