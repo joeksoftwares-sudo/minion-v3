@@ -38,13 +38,12 @@ const UNCLAIM_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 // --- Global State & Cache ---
 // Cache for managing claimed ticket state (since Node.js is single-process)
 const claimedTickets = new Collection();
+// Cache for managing soft-closed state to toggle 'Delete' button dynamically
+const softClosedTickets = new Collection(); 
 
 // --- Database Setup ---
 const db = new PgClient({
     connectionString: POSTGRES_URL,
-    // Railway handles the connection string, but we explicitly require SSL to be disabled 
-    // for local development if needed, but for production on Railway, it should work fine.
-    // The previous implementation used rejectUnauthorized: false which is safer for cloud providers.
     ssl: { rejectUnauthorized: false } 
 });
 
@@ -74,7 +73,9 @@ async function initializeDatabase() {
                 start_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 end_time TIMESTAMP WITH TIME ZONE,
                 claimer_id VARCHAR(255),
-                is_claimed BOOLEAN DEFAULT FALSE
+                is_claimed BOOLEAN DEFAULT FALSE,
+                is_soft_closed BOOLEAN DEFAULT FALSE,
+                html_transcript_link TEXT
             );
         `);
 
@@ -92,7 +93,6 @@ async function initializeDatabase() {
         console.log('Database tables verified/created successfully.');
     } catch (error) {
         console.error('Failed to initialize database:', error.message);
-        // Exit process if DB connection fails as the bot is non-functional without it.
         process.exit(1);
     }
 }
@@ -153,24 +153,35 @@ async function registerSlashCommands(clientId) {
             name: 'payout',
             description: 'Initiate a Robux payout request.',
         },
-        // RENAMED: Changed 'setup-panel' to 'panel'
         {
             name: 'panel',
             description: 'ADMIN ONLY: Deploys the persistent ticket panel.',
+            default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
+        },
+        {
+            name: 'close-ticket',
+            description: 'STAFF ONLY: Soft-close the current ticket (adds Robux).',
+        },
+        {
+            name: 'delete-ticket',
+            description: 'ADMIN ONLY: Generate transcript and finalize/delete the ticket.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         }
     ];
 
     try {
-        const guild = client.guilds.cache.get(GUILD_ID);
+        // --- CRITICAL CHANGE: Attempt to fetch the guild directly ---
+        const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
+
         if (guild) {
             await guild.commands.set(commands);
-            console.log('Slash commands registered.');
+            console.log(`✅ Slash commands successfully registered to guild: ${guild.name}`);
         } else {
-            console.warn(`Guild with ID ${GUILD_ID} not found. Skipping command registration.`);
+            console.error(`❌ CRITICAL ERROR: Guild with ID "${GUILD_ID}" not found or bot is not a member. Commands cannot be registered.`);
+            // Optionally, we could register globally here, but guild commands are faster for testing.
         }
     } catch (error) {
-        console.error('Error registering slash commands:', error);
+        console.error('❌ FATAL Error registering slash commands:', error);
     }
 }
 
@@ -225,11 +236,54 @@ async function setupTicketPanel() {
     const channel = client.channels.cache.get(TICKET_PANEL_CHANNEL_ID);
     if (!channel) return console.error('Ticket Panel Channel ID not found.');
 
-    const { embed, row } = createTicketPanel();
-
     // In a real scenario, we use the /panel command, but this ensures the function is called on startup.
     console.log('Ticket panel generated. Use /panel to deploy it.');
 }
+
+/**
+ * Generates the action row component based on the ticket's current claim and close status.
+ * @param {boolean} isClaimed - Whether the ticket is currently claimed.
+ * @param {boolean} isSoftClosed - Whether the ticket has been soft-closed (Robux added).
+ * @returns {ActionRowBuilder} The action row component.
+ */
+function getTicketActionRow(isClaimed, isSoftClosed) {
+    const claimButton = new ButtonBuilder()
+        .setCustomId(isClaimed ? 'ticket_unclaim' : 'ticket_claim')
+        .setLabel(isClaimed ? 'Unclaim' : 'Claim')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji(isClaimed ? '🔓' : '🔒')
+        .setDisabled(isSoftClosed); // Disable if soft-closed
+
+    let closeOrDeleteButton;
+
+    if (isSoftClosed) {
+        // Soft-Closed: Show Finalize & Delete button
+        closeOrDeleteButton = new ButtonBuilder()
+            .setCustomId('ticket_finalize_delete')
+            .setLabel('Finalize & Delete')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('💣');
+    } else {
+        // Not Soft-Closed: Show Soft Close button
+        closeOrDeleteButton = new ButtonBuilder()
+            .setCustomId('ticket_soft_close')
+            .setLabel('Close')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('💾');
+    }
+
+    // Admin Delete button (always available, but only works for admins)
+    const adminDeleteButton = new ButtonBuilder()
+        .setCustomId('ticket_admin_delete')
+        .setLabel('Admin Delete')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('❌')
+        .setDisabled(isSoftClosed); // Disable if soft-closed (use Finalize btn)
+
+    const row = new ActionRowBuilder().addComponents(claimButton, closeOrDeleteButton, adminDeleteButton);
+    return row;
+}
+
 
 // --- Transcript and Logging Helper ---
 
@@ -271,12 +325,14 @@ function generateHtmlTranscript(messages, creator) {
 
         content += `
             <div class="message">
-                <div class="header">
-                    <span class="username" style="color: ${usernameColor};">${msg.author.username}</span>
-                    ${botTag}
-                    <span style="float: right; font-size: 12px;">${timestamp}</span>
+                <div class="message">
+                    <div class="header">
+                        <span class="username" style="color: ${usernameColor};">${msg.author.username}</span>
+                        ${botTag}
+                        <span style="float: right; font-size: 12px;">${timestamp}</span>
+                    </div>
+                    <div class="content">${msg.content.replace(/\n/g, '<br>')}</div>
                 </div>
-                <div class="content">${msg.content.replace(/\n/g, '<br>')}</div>
             </div>
         `;
     });
@@ -310,16 +366,12 @@ client.on('interactionCreate', async interaction => {
 async function handleSlashCommand(interaction) {
     if (!interaction.inGuild()) return interaction.reply({ content: 'This command must be run in a server.', ephemeral: true });
 
-    // Check if the user has the Staff role for the two main commands
     const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
+    const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
 
     switch (interaction.commandName) {
-        // RENAMED: Changed 'setup-panel' case to 'panel'
         case 'panel':
-            // Check for Administrator permission
-            if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-                return interaction.reply({ content: 'You need Administrator permissions to set up the panel.', ephemeral: true });
-            }
+            if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to set up the panel.', ephemeral: true });
             const { embed, row } = createTicketPanel();
             await interaction.channel.send({ embeds: [embed], components: [row] });
             await interaction.reply({ content: 'Ticket panel deployed successfully.', ephemeral: true });
@@ -327,14 +379,13 @@ async function handleSlashCommand(interaction) {
 
         case 'check-robux':
             if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
-
             try {
                 const result = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [interaction.user.id]);
                 const balance = result.rows.length > 0 ? result.rows[0].robux_balance : 0;
 
                 const embed = new EmbedBuilder()
                     .setTitle('💰 Robux Payout Balance')
-                    .setColor('#FFC0CB') // Pink/Payout Color
+                    .setColor('#FFC0CB')
                     .setDescription(`
                         Your current earned balance is **${balance} R$**.
                         ---
@@ -352,17 +403,10 @@ async function handleSlashCommand(interaction) {
 
         case 'payout':
             if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', ephemeral: true });
-
+            
             const modal = new ModalBuilder()
                 .setCustomId('payout_modal')
                 .setTitle('Robux Payout Request');
-
-            const gamepassInput = new TextInputBuilder()
-                .setCustomId('gamepass_link')
-                .setLabel('Roblox Gamepass Link')
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder('https://www.roblox.com/game-pass/...')
-                .setRequired(true);
 
             const amountInput = new TextInputBuilder()
                 .setCustomId('payout_amount')
@@ -371,12 +415,30 @@ async function handleSlashCommand(interaction) {
                 .setPlaceholder(`Between ${PAYOUT_MIN} and ${PAYOUT_MAX}`)
                 .setRequired(true);
 
+            const gamepassInput = new TextInputBuilder()
+                .setCustomId('gamepass_link')
+                .setLabel('Roblox Gamepass Link')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('https://www.roblox.com/game-pass/...')
+                .setRequired(true);
+
             modal.addComponents(
                 new ActionRowBuilder().addComponents(amountInput),
                 new ActionRowBuilder().addComponents(gamepassInput)
             );
-
             await interaction.showModal(modal);
+            break;
+            
+        case 'close-ticket':
+            if (!isStaff) return interaction.reply({ content: 'You must be staff to use this command.', ephemeral: true });
+            await interaction.deferReply({ ephemeral: true });
+            await handleSoftCloseLogic(interaction, interaction.channel.id, interaction.user.id, true);
+            break;
+            
+        case 'delete-ticket':
+            if (!isAdmin) return interaction.reply({ content: 'You must be an admin to use this command.', ephemeral: true });
+            await interaction.deferReply({ ephemeral: true });
+            await handleDeleteLogic(interaction, interaction.channel.id, interaction.user.id, true);
             break;
     }
 }
@@ -431,7 +493,7 @@ async function handleSelectMenu(interaction) {
 }
 
 /**
- * Handles the submission of the Media Application Modal.
+ * Handles the submission of the Media Application Modal or Payout Modal.
  * @param {ModalSubmitInteraction} interaction
  */
 async function handleModalSubmit(interaction) {
@@ -453,6 +515,7 @@ async function handleModalSubmit(interaction) {
     }
 }
 
+
 /**
  * Handles staff payout request submission.
  * @param {ModalSubmitInteraction} interaction
@@ -472,7 +535,6 @@ async function handlePayoutRequest(interaction) {
     }
 
     try {
-        // 1. Check current balance
         const balanceResult = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [staffId]);
         const currentBalance = balanceResult.rows.length > 0 ? balanceResult.rows[0].robux_balance : 0;
 
@@ -482,19 +544,18 @@ async function handlePayoutRequest(interaction) {
             });
         }
 
-        // 2. Send to Admin Approval Channel
         const approvalChannel = client.channels.cache.get(ADMIN_APPROVAL_CHANNEL_ID);
         if (!approvalChannel) return interaction.editReply({ content: 'An internal error occurred: Approval channel not found.' });
 
         const approvalEmbed = new EmbedBuilder()
             .setTitle('💵 NEW ROBux PAYOUT REQUEST')
-            .setColor('#FFA500') // Orange/Alert Color
+            .setColor('#FFA500')
             .addFields(
                 { name: 'Staff Member', value: interaction.user.tag, inline: true },
                 { name: 'Requested Amount', value: `**${amount} R$**`, inline: true },
                 { name: 'Gamepass Link', value: gamepassLink },
                 { name: 'Staff ID', value: staffId },
-                { name: 'Request ID', value: `${staffId}-${Date.now()}` } // Unique ID for button
+                { name: 'Request ID', value: `${staffId}-${Date.now()}` }
             )
             .setTimestamp();
 
@@ -524,6 +585,20 @@ async function handlePayoutRequest(interaction) {
     }
 }
 
+/**
+ * Maps ticket type to its corresponding category ID.
+ * @param {string} ticketType - The ticket type string.
+ * @returns {string|null} The category ID.
+ */
+function getCategoryId(ticketType) {
+    switch (ticketType) {
+        case 'Apply for Media': return MEDIA_CATEGORY_ID;
+        case 'Report Exploiters': return REPORT_CATEGORY_ID;
+        case 'General Support': return SUPPORT_CATEGORY_ID;
+        default: return null;
+    }
+}
+
 
 /**
  * Creates the actual ticket channel with correct permissions and initial message.
@@ -541,7 +616,6 @@ async function createTicketChannel(interaction, ticketType, details = '') {
             return interaction.editReply({ content: 'Ticket category not configured. Please contact an admin.', ephemeral: true });
         }
 
-        // Check for existing open ticket by this user (prevent spam)
         const openTicket = await db.query('SELECT channel_id FROM ticket_logs WHERE creator_id = $1 AND end_time IS NULL', [user.id]);
         if (openTicket.rows.length > 0) {
             const channelId = openTicket.rows[0].channel_id;
@@ -555,22 +629,10 @@ async function createTicketChannel(interaction, ticketType, details = '') {
             type: ChannelType.GuildText,
             parent: ticketCategory,
             permissionOverwrites: [
-                {
-                    id: guild.id, // @everyone
-                    deny: [PermissionsBitField.Flags.ViewChannel],
-                },
-                {
-                    id: user.id, // Ticket Creator
-                    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-                },
-                {
-                    id: STAFF_ROLE_ID, // Staff Role
-                    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-                },
-                {
-                    id: ADMIN_ROLE_ID, // Admin Role
-                    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-                }
+                { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] }, // @everyone
+                { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }, // Ticket Creator
+                { id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }, // Staff Role
+                { id: ADMIN_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] } // Admin Role
             ],
         });
 
@@ -580,12 +642,8 @@ async function createTicketChannel(interaction, ticketType, details = '') {
             [channel.id, user.id, ticketType]
         );
 
-        // 3. Send Initial Message with Buttons
-        const buttons = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('claim_ticket').setLabel('Claim').setStyle(ButtonStyle.Primary).setEmoji('🔒'),
-            new ButtonBuilder().setCustomId('close_ticket').setLabel('Close').setStyle(ButtonStyle.Secondary).setEmoji('💾'),
-            new ButtonBuilder().setCustomId('delete_ticket').setLabel('Delete').setStyle(ButtonStyle.Danger).setEmoji('❌'),
-        );
+        // 3. Send Initial Message with Buttons (UNCLAIMED, NOT SOFT-CLOSED)
+        const buttons = getTicketActionRow(false, false);
 
         const initialEmbed = new EmbedBuilder()
             .setTitle(`New Ticket: ${ticketType}`)
@@ -614,49 +672,68 @@ async function createTicketChannel(interaction, ticketType, details = '') {
     }
 }
 
-/**
- * Maps ticket type to its corresponding category ID.
- * @param {string} ticketType - The ticket type string.
- * @returns {string|null} The category ID.
- */
-function getCategoryId(ticketType) {
-    switch (ticketType) {
-        case 'Apply for Media': return MEDIA_CATEGORY_ID;
-        case 'Report Exploiters': return REPORT_CATEGORY_ID;
-        case 'General Support': return SUPPORT_CATEGORY_ID;
-        default: return null;
-    }
-}
+
+// --- Button Interaction Handler ---
 
 /**
- * Handles all staff button interactions (Claim, Close, Delete, Payout Approval).
+ * Handles all staff button interactions.
  * @param {ButtonInteraction} interaction
  */
 async function handleButton(interaction) {
     if (!interaction.inGuild()) return interaction.reply({ content: 'This action must be run in a server.', ephemeral: true });
 
-    // Check staff permissions for ticket action buttons
     const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
     const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
 
-    const [action, ...args] = interaction.customId.split('_');
+    const customId = interaction.customId;
 
-    if (['claim', 'close', 'delete'].includes(action)) {
-        if (!isStaff) return interaction.reply({ content: 'You must be a staff member to perform this action.', ephemeral: true });
+    if (customId.startsWith('ticket_')) {
+        if (!isStaff) return interaction.reply({ content: 'You must be a staff member to perform ticket actions.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
-    }
 
-    if (action === 'claim') {
-        return handleClaim(interaction);
-    } else if (action === 'close') {
-        return handleClose(interaction);
-    } else if (action === 'delete') {
-        if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can finalize and delete tickets.', ephemeral: true });
-        return handleDelete(interaction);
-    } else if (action === 'payout') {
-        // Payout approval buttons (payout_approve_STAFFID_AMOUNT or payout_deny_STAFFID_AMOUNT)
+        const channelId = interaction.channel.id;
+        const staffId = interaction.user.id;
+
+        const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id, is_claimed, is_soft_closed FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
+        
+        // Allow ticket_admin_delete to run even if the ticket log is not found (for cleaning up old channels)
+        if (ticketLogResult.rows.length === 0 && customId !== 'ticket_admin_delete') {
+            return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', ephemeral: true });
+        }
+        
+        const { claimer_id, is_claimed, is_soft_closed } = ticketLogResult.rows[0] || {};
+        const isCurrentClaimer = claimer_id === staffId;
+
+
+        switch (customId) {
+            case 'ticket_claim':
+            case 'ticket_unclaim':
+                if (is_soft_closed) return interaction.editReply({ content: 'Cannot change claim status on a soft-closed ticket.', ephemeral: true });
+                await handleClaimUnclaimLogic(interaction, channelId, staffId, is_claimed, isCurrentClaimer, claimer_id);
+                break;
+
+            case 'ticket_soft_close':
+                if (!isCurrentClaimer && is_claimed) {
+                    return interaction.editReply({ content: `❌ This ticket is claimed by <@${claimer_id}>. You must unclaim it or be the claimer to soft-close.`, ephemeral: true });
+                }
+                await handleSoftCloseLogic(interaction, channelId, staffId, false);
+                break;
+
+            case 'ticket_admin_delete':
+                if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can force delete tickets.', ephemeral: true });
+                await handleDeleteLogic(interaction, channelId, staffId, false);
+                break;
+            
+            case 'ticket_finalize_delete':
+                if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can finalize and delete tickets.', ephemeral: true });
+                await handleDeleteLogic(interaction, channelId, staffId, false);
+                break;
+        }
+    } else if (customId.startsWith('payout_')) {
         if (!isAdmin) return interaction.reply({ content: 'Only Administrators can approve or deny payout requests.', ephemeral: true });
-        return handlePayoutApproval(interaction, action, args);
+        const [action, , staffId, amountStr] = customId.split('_');
+        const args = [staffId, amountStr];
+        await handlePayoutApproval(interaction, action, args);
     }
 }
 
@@ -671,7 +748,6 @@ function startUnclaimTimer(message, claimerId) {
     const channelId = message.channel.id;
     const guild = message.guild;
 
-    // Clear any existing timeout
     const existingTicket = claimedTickets.get(channelId);
     if (existingTicket?.timeoutId) {
         clearTimeout(existingTicket.timeoutId);
@@ -679,49 +755,14 @@ function startUnclaimTimer(message, claimerId) {
 
     const timeoutId = setTimeout(async () => {
         const ticketInfo = claimedTickets.get(channelId);
-        if (!ticketInfo || ticketInfo.claimerId !== claimerId) return; // Claim changed or was already unclaimed
+        if (!ticketInfo || ticketInfo.claimerId !== claimerId) return; 
 
-        await unclaimTicket(guild, channelId, true);
+        await unclaimTicket(guild, channelId, message.id);
         message.channel.send(`⚠️ <@${claimerId}> did not reply within 20 minutes of the user's message. The ticket has been **automatically unclaimed**. All staff can now respond.`);
     }, UNCLAIM_TIMEOUT_MS);
 
     // Update global state
     claimedTickets.set(channelId, { claimerId, timeoutId });
-}
-
-/**
- * Unclaims a ticket, resetting permissions and database state.
- * @param {Guild} guild The guild object.
- * @param {string} channelId The channel ID to unclaim.
- * @param {boolean} isTimeout If the unclaim was due to timeout.
- */
-async function unclaimTicket(guild, channelId, isTimeout = false) {
-    const channel = guild.channels.cache.get(channelId);
-    if (!channel) return;
-
-    // 1. Clear timeout from global state
-    const ticketInfo = claimedTickets.get(channelId);
-    if (ticketInfo?.timeoutId) clearTimeout(ticketInfo.timeoutId);
-    claimedTickets.delete(channelId);
-
-    // 2. Reset Permissions (restore send permissions for @Staff)
-    try {
-        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, {
-            SendMessages: true,
-        });
-
-        // 3. Update DB
-        await db.query(
-            'UPDATE ticket_logs SET is_claimed = FALSE, claimer_id = NULL WHERE channel_id = $1 AND end_time IS NULL',
-            [channelId]
-        );
-
-        // 4. Update Channel Topic
-        await channel.setTopic(channel.topic.replace(/🔒 Claimed by: .*$/i, ''));
-
-    } catch (error) {
-        console.error(`Error during unclaim/permission reset for ${channelId}:`, error);
-    }
 }
 
 client.on('messageCreate', async message => {
@@ -730,11 +771,11 @@ client.on('messageCreate', async message => {
     const channelId = message.channel.id;
     const ticketInfo = claimedTickets.get(channelId);
 
-    if (!ticketInfo) return; // Not a claimed ticket
+    if (!ticketInfo) return; 
 
-    const ticketLog = await db.query('SELECT creator_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
-    if (ticketLog.rows.length === 0) {
-        claimedTickets.delete(channelId); // Cleanup dead cache entry
+    const ticketLog = await db.query('SELECT creator_id, is_soft_closed FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
+    if (ticketLog.rows.length === 0 || ticketLog.rows[0].is_soft_closed) {
+        claimedTickets.delete(channelId); 
         return;
     }
 
@@ -746,156 +787,223 @@ client.on('messageCreate', async message => {
         startUnclaimTimer(message, claimerId);
     }
 
-    // Case 2: Message is from the CLAIMED STAFF -> RESET TIMER (if it exists)
+    // Case 2: Message is from the CLAIMED STAFF -> RESET TIMER (by setting timeoutId to null)
     if (message.author.id === claimerId) {
         if (ticketInfo?.timeoutId) {
             clearTimeout(ticketInfo.timeoutId);
-            claimedTickets.set(channelId, { claimerId: claimerId, timeoutId: null }); // Clear timeout flag
+            // Setting timeoutId to null prevents the timer from starting until the next user message
+            claimedTickets.set(channelId, { claimerId: claimerId, timeoutId: null }); 
         }
     }
 });
 
 
 /**
- * Handles the 'Claim' button press.
- * @param {ButtonInteraction} interaction
+ * Unclaims a ticket, resetting permissions and database state, and updating the message buttons.
+ * @param {Guild} guild The guild object.
+ * @param {string} channelId The channel ID to unclaim.
+ * @param {string} initialMessageId ID of the message to update buttons on.
  */
-async function handleClaim(interaction) {
-    const channel = interaction.channel;
-    const claimerId = interaction.user.id;
+async function unclaimTicket(guild, channelId, initialMessageId) {
+    const channel = guild.channels.cache.get(channelId);
+    if (!channel) return;
 
-    const ticketCheck = await db.query('SELECT is_claimed, claimer_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channel.id]);
+    // 1. Clear timeout from global state
+    const ticketInfo = claimedTickets.get(channelId);
+    if (ticketInfo?.timeoutId) clearTimeout(ticketInfo.timeoutId);
+    claimedTickets.delete(channelId);
 
-    if (ticketCheck.rows.length === 0) {
-        return interaction.editReply({ content: 'This channel is not an active ticket.', ephemeral: true });
-    }
+    // 2. Reset Permissions (restore send permissions for @Staff)
+    try {
+        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: true });
+        // NOTE: Permissions are generally handled by the main STAFF_ROLE_ID setting 
 
-    const { is_claimed, claimer_id } = ticketCheck.rows[0];
+        // 3. Update DB
+        await db.query(
+            'UPDATE ticket_logs SET is_claimed = FALSE, claimer_id = NULL WHERE channel_id = $1 AND end_time IS NULL',
+            [channelId]
+        );
 
-    if (is_claimed) {
-        // Unclaim if it's the current claimer, otherwise reject
-        if (claimer_id === claimerId) {
-            await unclaimTicket(interaction.guild, channel.id, false);
-            return interaction.editReply({ content: '✅ You have **unclaimed** this ticket. All staff can now respond.', ephemeral: true });
-        } else {
-            return interaction.editReply({ content: `❌ This ticket is already claimed by <@${claimer_id}>.`, ephemeral: true });
+        // 4. Update Channel Topic (Remove claimer info)
+        await channel.setTopic((channel.topic || '').replace(/🔒 Claimed by: .*$/i, ''));
+        
+        // 5. Update Buttons
+        const initialMessage = await channel.messages.fetch(initialMessageId).catch(() => null);
+        if (initialMessage) {
+            // Check soft closed status from cache or fresh lookup
+            const isSoftClosed = softClosedTickets.has(channelId);
+            const newRow = getTicketActionRow(false, isSoftClosed); // isClaimed: false
+            await initialMessage.edit({ components: [newRow] });
         }
+
+    } catch (error) {
+        console.error(`Error during unclaim/permission reset for ${channelId}:`, error);
     }
-
-    // 1. Claim the ticket
-    await db.query(
-        'UPDATE ticket_logs SET is_claimed = TRUE, claimer_id = $1 WHERE channel_id = $2 AND end_time IS NULL',
-        [claimerId, channel.id]
-    );
-
-    // 2. Update Channel Topic & Permissions (Deny SendMessages for other staff)
-    await channel.setTopic(`🔒 Claimed by: ${interaction.user.tag} (${claimerId}) | Type: ${ticketCheck.rows[0].ticket_type}`);
-
-    // Deny typing permission for ALL staff *except* Admins and the Claimer
-    const staffRole = channel.guild.roles.cache.get(STAFF_ROLE_ID);
-    if (staffRole) {
-        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false });
-    }
-    // Grant back SendMessages to the claiming staff member (though they should have it from the initial deny)
-    await channel.permissionOverwrites.edit(claimerId, { SendMessages: true });
-
-    // 3. Update global state
-    claimedTickets.set(channel.id, { claimerId, timeoutId: null });
-
-    await interaction.editReply({ content: '✅ You have **claimed** this ticket. Other staff members cannot type here until you unclaim it.', ephemeral: true });
-    await channel.send(`🔒 <@${claimerId}> has **claimed** this ticket and is taking over.`);
 }
 
 
-// --- Lifecycle Handlers (Close/Delete) ---
+/**
+ * Handles the 'Claim' or 'Unclaim' button press.
+ * @param {ButtonInteraction} interaction
+ * @param {string} claimerId The ID of the staff member who claimed it (if claimed).
+ */
+async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaimed, isCurrentClaimer, claimer_id) {
+    const channel = interaction.channel;
+
+    if (isClaimed) {
+        // UNCLAIM LOGIC
+        if (isCurrentClaimer) {
+            await unclaimTicket(interaction.guild, channelId, interaction.message.id);
+            await interaction.editReply({ content: '✅ You have **unclaimed** this ticket. All staff can now respond.', ephemeral: true });
+            await channel.send(`🔓 <@${staffId}> has **unclaimed** this ticket. It is now available for any staff member.`);
+        } else {
+            return interaction.editReply({ content: `❌ This ticket is claimed by <@${claimer_id}>. Only they can unclaim it.`, ephemeral: true });
+        }
+    } else {
+        // CLAIM LOGIC
+        // 1. Claim the ticket
+        await db.query(
+            'UPDATE ticket_logs SET is_claimed = TRUE, claimer_id = $1 WHERE channel_id = $2 AND end_time IS NULL',
+            [staffId, channelId]
+        );
+
+        // 2. Update Channel Topic & Permissions (Deny SendMessages for other staff)
+        await channel.setTopic(`🔒 Claimed by: ${interaction.user.tag} (${staffId})`);
+        
+        // Deny send messages permission for the general staff role
+        await channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false }); 
+        
+        // Explicitly allow send messages for the claiming staff member
+        await channel.permissionOverwrites.edit(staffId, { SendMessages: true });
+
+        // 3. Update global state (no timeout yet)
+        claimedTickets.set(channelId, { claimerId: staffId, timeoutId: null });
+        
+        // 4. Update Buttons (Claim -> Unclaim)
+        const isSoftClosed = softClosedTickets.has(channelId);
+        const newRow = getTicketActionRow(true, isSoftClosed); // isClaimed: true
+        await interaction.message.edit({ components: [newRow] });
+
+        await interaction.editReply({ content: '✅ You have **claimed** this ticket. Other staff members cannot type here until you unclaim it.', ephemeral: true });
+        await channel.send(`🔒 <@${staffId}> has **claimed** this ticket and is taking over.`);
+    }
+}
+
+
+// --- Soft Close (Robux Add) Logic ---
 
 /**
- * Handles the 'Close' button press (saves Robux, soft-closes).
- * @param {ButtonInteraction} interaction
+ * Handles the soft close action (adds Robux, locks channel, updates buttons to Delete).
+ * @param {Interaction} interaction - The button/slash command interaction.
+ * @param {string} channelId
+ * @param {string} staffId
+ * @param {boolean} isSlashCommand - True if triggered by /close-ticket.
  */
-async function handleClose(interaction) {
-    const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [interaction.channel.id]);
+async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashCommand) {
+    const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id, is_soft_closed FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
 
     if (ticketLogResult.rows.length === 0) {
-        return interaction.editReply({ content: 'This channel is not an active ticket.', ephemeral: true });
+        return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', ephemeral: true });
     }
 
-    const { creator_id, ticket_type, claimer_id } = ticketLogResult.rows[0];
+    const { creator_id, ticket_type, claimer_id, is_soft_closed } = ticketLogResult.rows[0];
 
-    if (claimer_id !== interaction.user.id) {
-        return interaction.editReply({ content: 'You must claim the ticket first to close it.', ephemeral: true });
+    if (is_soft_closed) {
+        return interaction.editReply({ content: 'This ticket is already soft-closed. Use the **Finalize & Delete** button to complete the process.', ephemeral: true });
     }
 
+    // 1. Unclaim just in case and remove from cache
+    if (claimedTickets.has(channelId)) {
+        // Use interaction.message.id if it's a button interaction, otherwise we need to fetch the pinned message
+        const initialMessageId = interaction.message ? interaction.message.id : (await interaction.channel.messages.fetchPinned()).first()?.id;
+        if (initialMessageId) {
+            await unclaimTicket(interaction.guild, channelId, initialMessageId);
+        }
+    }
+    
     const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
-
-    // 1. Unclaim just in case
-    await unclaimTicket(interaction.guild, interaction.channel.id);
 
     // 2. Add Robux and Log Close
     await db.query(
-        'UPDATE ticket_logs SET end_time = CURRENT_TIMESTAMP WHERE channel_id = $1',
-        [interaction.channel.id]
+        // Set is_soft_closed to true, but DON'T set end_time yet, as end_time means deletion is complete.
+        'UPDATE ticket_logs SET is_soft_closed = TRUE WHERE channel_id = $1', 
+        [channelId]
     );
-    const newBalance = await updateRobuxBalance(interaction.user.id, robuxValue);
+    const newBalance = await updateRobuxBalance(staffId, robuxValue);
+    softClosedTickets.set(channelId, true);
 
-    // 3. Update Message and Disable Buttons
-    const initialMessage = await interaction.channel.messages.fetch(interaction.message.id);
-    const disabledRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('claimed').setLabel('Claimed').setStyle(ButtonStyle.Primary).setDisabled(true).setEmoji('🔒'),
-        new ButtonBuilder().setCustomId('closed').setLabel('Closed').setStyle(ButtonStyle.Secondary).setDisabled(true).setEmoji('💾'),
-        new ButtonBuilder().setCustomId('deleted').setLabel('Deleted').setStyle(ButtonStyle.Danger).setDisabled(true).setEmoji('❌'),
-    );
+    // 3. Update Buttons (Close -> Finalize & Delete)
+    // Find the initial message to update its components
+    const initialMessage = interaction.message || (await interaction.channel.messages.fetchPinned()).first();
 
-    await initialMessage.edit({
-        content: `**Ticket Closed by ${interaction.user.tag}** | Finalized.`,
-        components: [disabledRow]
-    });
-
-    // 4. Send confirmation
-    await interaction.editReply({
-        content: `✅ Ticket closed. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). The channel is now locked.`,
-        ephemeral: true
-    });
-
-    // Lock permissions (deny creator and staff send access)
+    if (initialMessage) {
+        const newRow = getTicketActionRow(false, true); // isClaimed: false, isSoftClosed: true
+        await initialMessage.edit({
+            content: `**Ticket Soft-Closed by ${interaction.user.tag}** | Ready for final deletion.`,
+            components: [newRow]
+        }).catch(e => console.error("Error editing initial message for soft close:", e));
+    }
+    
+    // 4. Lock permissions (deny creator and staff send access)
     await interaction.channel.permissionOverwrites.edit(creator_id, { SendMessages: false });
     await interaction.channel.permissionOverwrites.edit(STAFF_ROLE_ID, { SendMessages: false });
+
+    // 5. Send confirmation
+    const replyContent = `✅ Ticket soft-closed. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). The channel is now locked. Use **Finalize & Delete** to remove the channel.`;
+    
+    if (isSlashCommand) {
+        await interaction.editReply({ content: replyContent });
+    } else {
+        await interaction.editReply({ content: replyContent, ephemeral: true });
+        await interaction.channel.send(`💾 <@${staffId}> has **soft-closed** this ticket. It is now locked and awaiting final deletion.`);
+    }
 }
 
+// --- Hard Delete (Transcript + Delete Channel) Logic ---
+
 /**
- * Handles the 'Delete' button press (saves Robux, generates transcript, deletes channel).
- * @param {ButtonInteraction} interaction
+ * Handles the hard delete action (transcript, database update, channel delete).
+ * @param {Interaction} interaction - The button/slash command interaction.
+ * @param {string} channelId
+ * @param {string} staffId
+ * @param {boolean} isSlashCommand - True if triggered by /delete-ticket.
  */
-async function handleDelete(interaction) {
+async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand) {
     const channel = interaction.channel;
-    const ticketLogResult = await db.query('SELECT creator_id, ticket_type, claimer_id FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channel.id]);
+    const isFinalizeDelete = interaction.customId === 'ticket_finalize_delete';
+    
+    let ticketLogResult;
+    
+    // Admins can force delete (ticket_admin_delete) even if soft-closed flag isn't set (end_time IS NULL)
+    // Finalize delete (ticket_finalize_delete) is used after soft-close (is_soft_closed = TRUE)
+    if (isFinalizeDelete) {
+        ticketLogResult = await db.query('SELECT creator_id, ticket_type FROM ticket_logs WHERE channel_id = $1 AND is_soft_closed = TRUE AND end_time IS NULL', [channelId]);
+    } else {
+        // Admin delete bypasses soft-closed check and is intended for cleanup of *active* or *stuck* tickets
+        ticketLogResult = await db.query('SELECT creator_id, ticket_type FROM ticket_logs WHERE channel_id = $1 AND end_time IS NULL', [channelId]);
+    }
 
     if (ticketLogResult.rows.length === 0) {
-        return interaction.editReply({ content: 'This channel is not an active ticket.', ephemeral: true });
+        return interaction.editReply({ content: 'This ticket cannot be finalized or deleted right now. Check if it has been soft-closed/finalized already or contact an admin.', ephemeral: true });
     }
-
-    const { creator_id, ticket_type, claimer_id } = ticketLogResult.rows[0];
-
-    // Must be claimed by current user, or just an admin finalizing it if it's already closed.
-    if (!claimer_id || claimer_id !== interaction.user.id) {
-        return interaction.editReply({ content: 'You must claim the ticket first to delete it.', ephemeral: true });
-    }
-
-    const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
-    const creator = await interaction.guild.members.fetch(creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
-
-    // 1. Unclaim just in case
-    await unclaimTicket(interaction.guild, interaction.channel.id);
+    
+    const { creator_id, ticket_type } = ticketLogResult.rows[0];
+    
+    // 1. Clean up cache
+    claimedTickets.delete(channelId);
+    softClosedTickets.delete(channelId);
 
     // 2. Fetch all messages for transcript
-    const messages = await channel.messages.fetch({ limit: 100 });
+    const creator = await interaction.guild.members.fetch(creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
+    // Fetch up to 200 messages for a more complete transcript
+    const messages = await channel.messages.fetch({ limit: 200 }); 
     const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
     const htmlContent = generateHtmlTranscript(sortedMessages, creator);
 
     const logChannel = client.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID);
-    if (!logChannel) {
-        await interaction.editReply({ content: '❌ Transcript log channel not found. Deleting ticket without logging.' });
-    } else {
+    let transcriptUrl = 'URL not available.';
+    
+    if (logChannel) {
         // 3. Upload Transcript
         const attachment = new AttachmentBuilder(Buffer.from(htmlContent), { name: `transcript-${channel.name}-${Date.now()}.html` });
         const logMessage = await logChannel.send({
@@ -903,33 +1011,39 @@ async function handleDelete(interaction) {
             files: [attachment]
         });
 
-        // 4. Extract Hosted Link (Discord provides direct CDN link upon upload)
-        const transcriptUrl = logMessage.attachments.first()?.url || 'URL not available.';
+        // 4. Extract Hosted Link 
+        transcriptUrl = logMessage.attachments.first()?.url || 'URL not available.';
 
         // Add Direct Link Button
         const linkRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setLabel('Direct Link')
-                .setStyle(ButtonStyle.Link)
-                .setURL(transcriptUrl)
+            new ButtonBuilder().setLabel('Direct Link').setStyle(ButtonStyle.Link).setURL(transcriptUrl)
         );
-
         await logMessage.edit({ components: [linkRow] });
 
-        // 5. Update DB and Add Robux
+        // 5. Update DB (Finalize end_time and link. This marks the ticket as officially closed)
         await db.query(
-            'UPDATE ticket_logs SET end_time = CURRENT_TIMESTAMP, html_transcript_link = $2 WHERE channel_id = $1',
-            [channel.id, transcriptUrl]
+            'UPDATE ticket_logs SET html_transcript_link = $2, end_time = CURRENT_TIMESTAMP WHERE channel_id = $1',
+            [channelId, transcriptUrl]
         );
-        const newBalance = await updateRobuxBalance(interaction.user.id, robuxValue);
-
-        await interaction.editReply({
-            content: `✅ Ticket deleted. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). Transcript saved. Channel will be deleted in 5 seconds.`,
-            ephemeral: true
-        });
+    } else {
+        // If log channel is missing, still mark as deleted in DB for cleanup
+        await db.query(
+            'UPDATE ticket_logs SET end_time = CURRENT_TIMESTAMP WHERE channel_id = $1',
+            [channelId]
+        );
+        await interaction.editReply({ content: '❌ Transcript log channel not found. Deleting ticket without logging.', ephemeral: true });
     }
 
-    // 6. Delete Channel
+    // 6. Send final confirmation
+    const finalReply = `✅ Ticket finalized and deleted. Transcript saved. Channel will be deleted in 5 seconds.`;
+    
+    if (isSlashCommand) {
+        await interaction.editReply({ content: finalReply });
+    } else {
+        await interaction.editReply({ content: finalReply, ephemeral: true });
+    }
+
+    // 7. Delete Channel
     setTimeout(() => {
         channel.delete('Ticket finalized and deleted by staff.').catch(err => console.error('Error deleting channel:', err));
     }, 5000);
@@ -959,7 +1073,6 @@ async function handlePayoutApproval(interaction, action, args) {
     await interaction.message.edit({ components: [disabledRow] });
 
     if (!isApproval) {
-        // Denial: Just update the message and notify the staff
         try {
             const staffMember = await client.users.fetch(staffId);
             await staffMember.send(`❌ Your Robux payout request for **${amount} R$** has been **denied** by <@${approverId}>. Please contact them for details.`);
@@ -972,7 +1085,6 @@ async function handlePayoutApproval(interaction, action, args) {
 
     // Approval Logic
     try {
-        // 1. Get staff's current balance again (for double check)
         const balanceResult = await db.query('SELECT robux_balance FROM staff_data WHERE user_id = $1', [staffId]);
         const currentBalance = balanceResult.rows.length > 0 ? balanceResult.rows[0].robux_balance : 0;
 
