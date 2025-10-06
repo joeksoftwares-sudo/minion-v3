@@ -1275,14 +1275,17 @@ async function handlePayoutApproval(interaction, action, args) {
     const approverId = interaction.user.id;
     const isApproval = action === 'payout_approve';
 
+    // Debug logging for customId parsing
+    console.log(`[PAYOUT] Button action: ${action}, staffId: ${staffId}, amount: ${amount}, isApproval: ${isApproval}`);
+
     try {
         // Disable buttons immediately to prevent double-processing
         const disabledRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('approved').setLabel(isApproval ? '✅ Approved' : '❌ Denied').setStyle(isApproval ? ButtonStyle.Success : ButtonStyle.Danger).setDisabled(true)
+            new ButtonBuilder().setCustomId(`payout_${isApproval ? 'approved' : 'denied'}_${staffId}_${amount}`).setLabel(isApproval ? '✅ Approved' : '❌ Denied').setStyle(isApproval ? ButtonStyle.Success : ButtonStyle.Danger).setDisabled(true)
         );
         await interaction.message.edit({ components: [disabledRow] });
 
-        if (!isApproval) {
+        if (action === 'payout_deny') {
             try {
                 const staffMember = await client.users.fetch(staffId);
                 await staffMember.send(`❌ Your Robux payout request for **${amount} R$** has been **denied** by <@${approverId}>. Please contact them for details.`);
@@ -1291,50 +1294,51 @@ async function handlePayoutApproval(interaction, action, args) {
                 console.error('Error denying payout:', error);
                 return interaction.editReply({ content: `❌ Denied, but could not DM staff member <@${staffId}>.` });
             }
+        } else if (action === 'payout_approve') {
+            // Approval Logic
+            // --- IN-MEMORY BALANCE CHECK ---
+            const balanceData = staffData.get(staffId);
+            const currentBalance = balanceData ? balanceData.robux_balance : 0;
+            // -------------------------------
+
+            if (currentBalance < amount) {
+                return interaction.editReply({ content: `⚠️ Cannot approve. Staff member's balance (**${currentBalance} R$**) is now less than the requested amount (**${amount} R$**). Request rejected.` });
+            }
+
+            // 2. Reset Balance (using negative amount in updateRobuxBalance)
+            updateRobuxBalance(staffId, -amount);
+
+            // 3. Log the successful transaction (In-Memory)
+            const gamepassLink = interaction.message.embeds[0].fields.find(f => f.name === 'Gamepass Link')?.value || 'N/A';
+            transactionCounter++;
+            transactionLogs.push({
+                transaction_id: transactionCounter,
+                staff_id: staffId,
+                amount_paid: amount,
+                transaction_date: new Date(),
+                gamepass_link: gamepassLink,
+                admin_approver_id: approverId
+            });
+
+            // 4. Notify Staff Member
+            const staffMember = await client.users.fetch(staffId);
+            await staffMember.send(
+                `✅ Your Robux payout request for **${amount} R$** has been **approved** by <@${approverId}>! Your balance has been reset to **0 R$**.\n\nPlease ensure your **Roblox Gamepass** is correctly configured to receive the payment shortly.`
+            );
+
+            // 5. Final Confirmation
+            await interaction.editReply({ content: `✅ Payout of **${amount} R$** to <@${staffId}> approved and logged. Staff notified. Balance reset to 0.` });
+        } else {
+            // Unexpected action fallback
+            await interaction.editReply({ content: `❌ Unknown payout action: ${action}. Please contact a developer.` });
         }
-
-        // Approval Logic
-        // --- IN-MEMORY BALANCE CHECK ---
-        const balanceData = staffData.get(staffId);
-        const currentBalance = balanceData ? balanceData.robux_balance : 0;
-        // -------------------------------
-
-        if (currentBalance < amount) {
-            return interaction.editReply({ content: `⚠️ Cannot approve. Staff member's balance (**${currentBalance} R$**) is now less than the requested amount (**${amount} R$**). Request rejected.` });
-        }
-
-        // 2. Reset Balance (using negative amount in updateRobuxBalance)
-        updateRobuxBalance(staffId, -amount);
-
-        // 3. Log the successful transaction (In-Memory)
-        const gamepassLink = interaction.message.embeds[0].fields.find(f => f.name === 'Gamepass Link')?.value || 'N/A';
-        transactionCounter++;
-        transactionLogs.push({
-            transaction_id: transactionCounter,
-            staff_id: staffId,
-            amount_paid: amount,
-            transaction_date: new Date(),
-            gamepass_link: gamepassLink,
-            admin_approver_id: approverId
-        });
-
-        // 4. Notify Staff Member
-        const staffMember = await client.users.fetch(staffId);
-        await staffMember.send(
-            `✅ Your Robux payout request for **${amount} R$** has been **approved** by <@${approverId}>! Your balance has been reset to **0 R$**.\n\nPlease ensure your **Roblox Gamepass** is correctly configured to receive the payment shortly.`
-        );
-
-        // 5. Final Confirmation
-        await interaction.editReply({ content: `✅ Payout of **${amount} R$** to <@${staffId}> approved and logged. Staff notified. Balance reset to 0.` });
 
     } catch (error) {
         console.error('Error during payout approval:', error);
-        
         // CRITICAL: Rollback balance if transaction fails mid-process (approval attempt was made)
         if (isApproval) {
             updateRobuxBalance(staffId, amount); 
         }
-        
         throw error; // Re-throw to be caught by the general handler
     }
 }
