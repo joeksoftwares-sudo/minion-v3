@@ -783,15 +783,19 @@ async function handleButton(interaction) {
 
             // --- IN-MEMORY TICKET LOG CHECK ---
             const ticketLog = getActiveTicketLog(channelId);
-            
-            // Allow ticket_admin_delete to run even if the ticket log is not found (for cleaning up old channels)
-            if (!ticketLog && customId !== 'ticket_admin_delete') {
+
+            // Only check for active ticket for ticket channel actions, not for reward approval buttons
+            if (
+                !ticketLog &&
+                customId !== 'ticket_admin_delete' &&
+                customId !== 'ticket_reward_approve' &&
+                customId !== 'ticket_reward_deny'
+            ) {
                 return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', flags: EPHEMERAL_FLAG });
             }
-            
+
             const { claimer_id, is_claimed, is_soft_closed } = ticketLog || {};
             const isCurrentClaimer = claimer_id === staffId;
-
 
             switch (customId) {
                 case 'ticket_claim':
@@ -818,7 +822,7 @@ async function handleButton(interaction) {
                     await handleDeleteLogic(interaction, channelId, staffId, false);
                     break;
             }
-        } 
+        }
         // NEW: Handle ticket reward approvals
         else if (customId.startsWith('ticket_reward_')) {
             if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can approve or deny ticket rewards.', flags: EPHEMERAL_FLAG });
