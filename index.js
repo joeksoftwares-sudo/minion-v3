@@ -187,7 +187,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'add-robux',
-            description: 'ADMIN ONLY: Manually add Robux to a staff member\'s balance.',
+            description: 'ADMIN ONLY: Manually add Robux to staff balance.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
@@ -197,26 +197,26 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'close-ticket',
-            description: 'STAFF ONLY: Soft-close the current ticket (sends reward request).',
+            description: 'STAFF ONLY: Soft-close ticket (sends reward request).',
         },
         {
             name: 'delete-ticket',
-            description: 'ADMIN ONLY: Generate transcript and finalize/delete the ticket.',
+            description: 'ADMIN ONLY: Generate transcript and delete ticket.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'payout-stats',
-            description: 'ADMIN ONLY: View comprehensive payout statistics and data.',
+            description: 'ADMIN ONLY: View payout statistics and data.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'user-info',
-            description: 'ADMIN ONLY: View detailed information about a specific user.',
+            description: 'ADMIN ONLY: View user information.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'roll',
-            description: '🎲 Roll dice! Supports multiple dice and custom sides.',
+            description: '🎲 Roll dice with custom sides!',
         },
         {
             name: 'coinflip',
@@ -228,7 +228,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'rps',
-            description: '✂️ Play Rock, Paper, Scissors against the bot!',
+            description: '✂️ Play Rock, Paper, Scissors!',
         },
         {
             name: 'joke',
@@ -264,11 +264,11 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'serverinfo',
-            description: '📊 Get detailed information about this server!',
+            description: '📊 Get server information!',
         },
         {
             name: 'userprofile',
-            description: '👤 Get detailed profile info about a user!',
+            description: '👤 Get user profile info!',
         },
         {
             name: 'poll',
@@ -316,7 +316,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'wordcount',
-            description: '📏 Count words, characters, and lines in text!',
+            description: '📏 Count words and characters in text!',
         },
         {
             name: 'translate',
@@ -340,7 +340,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'pokemon',
-            description: '⚡ Get information about any Pokémon!',
+            description: '⚡ Get Pokémon information!',
         },
         {
             name: 'horoscope',
@@ -348,11 +348,11 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'number',
-            description: '🔢 Get a random interesting fact about a number!',
+            description: '🔢 Get an interesting number fact!',
         },
         {
             name: 'compliment',
-            description: '💖 Get or give someone a nice compliment!',
+            description: '💖 Get or give a nice compliment!',
         },
         {
             name: 'insult',
@@ -364,11 +364,11 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'achievement',
-            description: '🏆 Generate a Minecraft-style achievement!',
+            description: '🏆 Generate a Minecraft achievement!',
         },
         {
             name: 'ship',
-            description: '💕 Ship two users and see their compatibility!',
+            description: '💕 Ship two users and see compatibility!',
         },
         {
             name: 'rate',
@@ -376,11 +376,11 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'choose',
-            description: '🤔 Let the bot choose between multiple options!',
+            description: '🤔 Let the bot choose between options!',
         },
         {
             name: 'roast',
-            description: '🔥 Get roasted by the bot (all in good fun)!',
+            description: '🔥 Get roasted by the bot (all fun)!',
         },
         {
             name: 'trivia',
@@ -428,7 +428,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'leaderboard',
-            description: '🏅 View the server activity leaderboard!',
+            description: '🏅 View the server leaderboard!',
         },
         {
             name: 'level',
