@@ -774,7 +774,18 @@ async function handleButton(interaction) {
     await interaction.deferReply({ flags: EPHEMERAL_FLAG }).catch(e => console.error("Failed to defer reply:", e));
 
     try {
-        if (customId.startsWith('ticket_')) {
+        if (customId.startsWith('ticket_reward_')) {
+            if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can approve or deny ticket rewards.', flags: EPHEMERAL_FLAG });
+            // Custom ID format: ticket_reward_approve_channelId_staffId_amount or ticket_reward_deny_channelId_staffId
+            const parts = customId.split('_');
+            // parts[0] = 'ticket', parts[1] = 'reward', parts[2] = 'approve' or 'deny', parts[3] = channelId, parts[4] = staffId, parts[5] = amount (if approve)
+            const action = parts[2] === 'approve' ? 'ticket_reward_approve' : 'ticket_reward_deny';
+            const channelId = parts[3];
+            const staffId = parts[4];
+            const amountStr = parts[2] === 'approve' ? parts[5] : undefined;
+            const args = [channelId, staffId, amountStr];
+            await handleTicketRewardApproval(interaction, action, args);
+        } else if (customId.startsWith('ticket_')) {
             // Check for general staff access on all ticket buttons
             if (!isStaff && customId !== 'ticket_admin_delete') return interaction.editReply({ content: 'You must be a staff member to perform ticket actions.', flags: EPHEMERAL_FLAG });
 
@@ -784,13 +795,8 @@ async function handleButton(interaction) {
             // --- IN-MEMORY TICKET LOG CHECK ---
             const ticketLog = getActiveTicketLog(channelId);
 
-            // Only check for active ticket for ticket channel actions, not for reward approval buttons
-            if (
-                !ticketLog &&
-                customId !== 'ticket_admin_delete' &&
-                customId !== 'ticket_reward_approve' &&
-                customId !== 'ticket_reward_deny'
-            ) {
+            // Only check for active ticket for ticket channel actions
+            if (!ticketLog && customId !== 'ticket_admin_delete') {
                 return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', flags: EPHEMERAL_FLAG });
             }
 
@@ -822,19 +828,6 @@ async function handleButton(interaction) {
                     await handleDeleteLogic(interaction, channelId, staffId, false);
                     break;
             }
-        }
-        // NEW: Handle ticket reward approvals
-        else if (customId.startsWith('ticket_reward_')) {
-            if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can approve or deny ticket rewards.', flags: EPHEMERAL_FLAG });
-            // Custom ID format: ticket_reward_approve_channelId_staffId_amount or ticket_reward_deny_channelId_staffId
-            const parts = customId.split('_');
-            // parts[0] = 'ticket', parts[1] = 'reward', parts[2] = 'approve' or 'deny', parts[3] = channelId, parts[4] = staffId, parts[5] = amount (if approve)
-            const action = parts[2] === 'approve' ? 'ticket_reward_approve' : 'ticket_reward_deny';
-            const channelId = parts[3];
-            const staffId = parts[4];
-            const amountStr = parts[2] === 'approve' ? parts[5] : undefined;
-            const args = [channelId, staffId, amountStr];
-            await handleTicketRewardApproval(interaction, action, args);
 
         } else if (customId.startsWith('payout_')) {
             if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can approve or deny payout requests.', flags: EPHEMERAL_FLAG });
