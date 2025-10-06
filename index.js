@@ -1,16 +1,8 @@
-// Discord Ticket System Bot - Built for Railway.app with In-Memory Storage
-// WARNING: All data in this file will be lost if the bot restarts or redeploys!
-// FIXES: 
-// 1. Critical Fix: Modal label length constraint violation resolved in 'Apply for Media' modal for the SECOND input field.
-// 2. Deprecation Fixes: Replaced 'ready' with 'clientReady', 'isSelectMenu' with 'isStringSelectMenu', and 'ephemeral: true' with 'flags: 64'.
-// 3. Allowed STAFF_ROLE_ID to use the "Finalize & Delete" button.
-
 const {
     Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder,
     StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder,
     TextInputStyle, ChannelType, PermissionsBitField, AttachmentBuilder,
     Collection,
-    // Import Flags constant for ephemeral replacement
     MessageFlags
 } = require('discord.js');
 
@@ -19,7 +11,6 @@ const EPHEMERAL_FLAG = MessageFlags.Ephemeral;
 
 // --- Configuration from Environment Variables ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-// POSTGRES_URL is no longer needed
 const GUILD_ID = process.env.GUILD_ID;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; 
@@ -93,7 +84,6 @@ const client = new Client({
     partials: [Partials.Channel],
 });
 
-// FIX: Renamed 'ready' to 'clientReady' to resolve deprecation warning
 client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     console.log('⚠️ WARNING: Using In-Memory Storage. All data will be lost on bot restart/redeploy.');
@@ -117,6 +107,12 @@ async function registerSlashCommands(clientId) {
             name: 'payout',
             description: 'Initiate a Robux payout request.',
         },
+        // NEW: Admin command to manually add Robux
+        {
+            name: 'add-robux',
+            description: 'ADMIN ONLY: Manually add Robux to a staff member\'s balance.',
+            default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
+        },
         {
             name: 'panel',
             description: 'ADMIN ONLY: Deploys the persistent ticket panel.',
@@ -124,7 +120,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'close-ticket',
-            description: 'STAFF ONLY: Soft-close the current ticket (adds Robux).',
+            description: 'STAFF ONLY: Soft-close the current ticket (sends reward request).',
         },
         {
             name: 'delete-ticket',
@@ -162,7 +158,6 @@ function createTicketPanel() {
         .setFooter({ text: 'Powered by the Bot Team' })
         .setTimestamp();
 
-    // FIX: Using StringSelectMenuBuilder to resolve deprecation warning and prevent interaction failures
     const selectMenu = new StringSelectMenuBuilder()
         .setCustomId('select_ticket_type')
         .setPlaceholder('Select a Ticket Category...')
@@ -229,7 +224,7 @@ function getTicketActionRow(isClaimed, isSoftClosed) {
         // Not Soft-Closed: Show Soft Close button
         closeOrDeleteButton = new ButtonBuilder()
             .setCustomId('ticket_soft_close')
-            .setLabel('Close')
+            .setLabel('Close (Request Reward)') // Updated label to reflect new process
             .setStyle(ButtonStyle.Secondary)
             .setEmoji('💾');
     }
@@ -311,7 +306,6 @@ function generateHtmlTranscript(messages, creator) {
 client.on('interactionCreate', async interaction => {
     if (interaction.isCommand()) {
         await handleSlashCommand(interaction);
-    // FIX: Replaced isSelectMenu() with isStringSelectMenu()
     } else if (interaction.isStringSelectMenu()) {
         await handleSelectMenu(interaction);
     } else if (interaction.isModalSubmit()) {
@@ -326,7 +320,6 @@ client.on('interactionCreate', async interaction => {
  * @param {CommandInteraction} interaction
  */
 async function handleSlashCommand(interaction) {
-    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
     if (!interaction.inGuild()) return interaction.reply({ content: 'This command must be run in a server.', flags: EPHEMERAL_FLAG });
 
     const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
@@ -335,16 +328,13 @@ async function handleSlashCommand(interaction) {
     try {
         switch (interaction.commandName) {
             case 'panel':
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to set up the panel.', flags: EPHEMERAL_FLAG });
                 const { embed, row } = createTicketPanel();
                 await interaction.channel.send({ embeds: [embed], components: [row] });
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 await interaction.reply({ content: 'Ticket panel deployed successfully.', flags: EPHEMERAL_FLAG });
                 break;
 
             case 'check-robux':
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', flags: EPHEMERAL_FLAG });
                 
                 try {
@@ -364,17 +354,14 @@ async function handleSlashCommand(interaction) {
                             - **Max Request:** ${PAYOUT_MAX} R$
                             - Use \`/payout\` when you are ready to request a payment.
                         `);
-                    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                     await interaction.reply({ embeds: [embed], flags: EPHEMERAL_FLAG });
                 } catch (error) {
                     console.error('Error checking balance:', error);
-                    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                     await interaction.reply({ content: 'An error occurred while fetching your balance.', flags: EPHEMERAL_FLAG });
                 }
                 break;
 
             case 'payout':
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 if (!isStaff) return interaction.reply({ content: 'You must be a staff member to use this command.', flags: EPHEMERAL_FLAG });
                 
                 const modal = new ModalBuilder()
@@ -402,24 +389,48 @@ async function handleSlashCommand(interaction) {
                 await interaction.showModal(modal);
                 break;
                 
+            // NEW: Command to manually add Robux to a staff member
+            case 'add-robux':
+                if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to use this command.', flags: EPHEMERAL_FLAG });
+                
+                const addRobuxModal = new ModalBuilder()
+                    .setCustomId('add_robux_modal')
+                    .setTitle('Manually Add Robux');
+
+                const targetIdInput = new TextInputBuilder()
+                    .setCustomId('target_user_id')
+                    .setLabel('Target Staff Member ID')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+
+                const amountToAddInput = new TextInputBuilder()
+                    .setCustomId('robux_amount_to_add')
+                    .setLabel('Robux Amount to Add (R$)')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+
+                addRobuxModal.addComponents(
+                    new ActionRowBuilder().addComponents(targetIdInput),
+                    new ActionRowBuilder().addComponents(amountToAddInput)
+                );
+                await interaction.showModal(addRobuxModal);
+                break;
+                
             case 'close-ticket':
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 if (!isStaff) return interaction.reply({ content: 'You must be staff to use this command.', flags: EPHEMERAL_FLAG });
-                await interaction.deferReply({ flags: EPHEMERAL_FLAG }); // Also using flag here
+                await interaction.deferReply({ flags: EPHEMERAL_FLAG });
                 await handleSoftCloseLogic(interaction, interaction.channel.id, interaction.user.id, true);
                 break;
                 
             case 'delete-ticket':
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 if (!isAdmin) return interaction.reply({ content: 'You must be an admin to use this command.', flags: EPHEMERAL_FLAG });
-                await interaction.deferReply({ flags: EPHEMERAL_FLAG }); // Also using flag here
+                await interaction.deferReply({ flags: EPHEMERAL_FLAG });
                 await handleDeleteLogic(interaction, interaction.channel.id, interaction.user.id, true);
                 break;
         }
     } catch (error) {
         console.error(`Error processing slash command /${interaction.commandName}:`, error);
         if (!interaction.replied && !interaction.deferred) {
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             await interaction.reply({ content: '❌ An unexpected internal error prevented this command. Check the bot logs for details.', flags: EPHEMERAL_FLAG });
         } else {
              await interaction.editReply({ content: '❌ An unexpected internal error prevented this command. Check the bot logs for details.', flags: EPHEMERAL_FLAG });
@@ -443,7 +454,6 @@ async function handleSelectMenu(interaction) {
                 .setCustomId('media_application_modal')
                 .setTitle('Media Application Form');
 
-            // FIX 1 (From previous step): Shortened label to be <= 45 characters 
             const linkInput = new TextInputBuilder()
                 .setCustomId('platform_link')
                 .setLabel('Link to Content Platform (YouTube, TikTok)') 
@@ -451,7 +461,6 @@ async function handleSelectMenu(interaction) {
                 .setPlaceholder('e.g., youtube.com/@YourChannel')
                 .setRequired(true);
 
-            // FIX 2 (New Fix): Shortened label to be <= 45 characters (was 53 chars)
             const countInput = new TextInputBuilder()
                 .setCustomId('follower_count')
                 .setLabel('Follower/Subscriber Count (Number Only)')
@@ -461,35 +470,28 @@ async function handleSelectMenu(interaction) {
 
             const planInput = new TextInputBuilder()
                 .setCustomId('content_plan')
-                .setLabel('Content plan for the server (Detailed description)')
+                .setLabel('Content Plan for the Server') 
                 .setStyle(TextInputStyle.Paragraph)
                 .setRequired(true);
 
-            // Each TextInputBuilder MUST be wrapped in its own ActionRowBuilder for Modals
             modal.addComponents(
                 new ActionRowBuilder().addComponents(linkInput),
                 new ActionRowBuilder().addComponents(countInput),
                 new ActionRowBuilder().addComponents(planInput)
             );
 
-            // Attempt to show the modal (this was the critical failure point)
             return interaction.showModal(modal);
         }
 
         // 2. Direct Channel Creation for other types
-        // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
         await interaction.deferReply({ flags: EPHEMERAL_FLAG });
         await createTicketChannel(interaction, ticketType);
     } catch (error) {
-        // --- CRITICAL LOGGING ---
-        console.error('❌ CRITICAL: Error during Select Menu (Modal Show) Interaction. Likely API rejection or component conflict. Full Error:', error);
-        // --- END CRITICAL LOGGING ---
+        console.error('❌ CRITICAL: Error during Select Menu (Modal Show) Interaction:', error);
         
-        let errorMessage = '❌ An error occurred trying to open the Media Application Form. This is often caused by a missing Discord bot permission (e.g., "Use Application Commands") or a transient issue. Please check the console logs for the specific error code.';
+        let errorMessage = '❌ An error occurred trying to open the Media Application Form. This is often caused by a missing Discord bot permission.';
 
-        // Try to reply to the failed interaction (which is difficult when it fails immediately)
         if (!interaction.replied && !interaction.deferred) {
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             await interaction.reply({ content: errorMessage, flags: EPHEMERAL_FLAG }).catch(e => console.error("Failed to reply to failed interaction:", e));
         } else {
              await interaction.editReply({ content: errorMessage, flags: EPHEMERAL_FLAG }).catch(e => console.error("Failed to edit reply to failed interaction:", e));
@@ -498,12 +500,11 @@ async function handleSelectMenu(interaction) {
 }
 
 /**
- * Handles the submission of the Media Application Modal or Payout Modal.
+ * Handles the submission of Modals.
  * @param {ModalSubmitInteraction} interaction
  */
 async function handleModalSubmit(interaction) {
     // Defer the reply for channel creation/request handling
-    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
     await interaction.deferReply({ flags: EPHEMERAL_FLAG });
     
     try {
@@ -519,10 +520,13 @@ async function handleModalSubmit(interaction) {
                 **Content Plan:**\n${plan}
             `;
 
-            // If an error happens inside createTicketChannel, it will be caught here and logged.
             await createTicketChannel(interaction, 'Apply for Media', details);
         } else if (interaction.customId === 'payout_modal') {
             await handlePayoutRequest(interaction);
+        } 
+        // NEW: Handle manual Robux addition
+        else if (interaction.customId === 'add_robux_modal') {
+            await handleManualRobuxAddition(interaction);
         }
     } catch (error) {
          console.error('Error processing modal submission (likely during channel creation):', error);
@@ -533,6 +537,43 @@ async function handleModalSubmit(interaction) {
          }
          
         await interaction.editReply({ content: errorMessage, flags: EPHEMERAL_FLAG });
+    }
+}
+
+/**
+ * Handles the manual addition of Robux by an Admin.
+ * @param {ModalSubmitInteraction} interaction
+ */
+async function handleManualRobuxAddition(interaction) {
+    try {
+        const targetId = interaction.fields.getTextInputValue('target_user_id');
+        const amountStr = interaction.fields.getTextInputValue('robux_amount_to_add');
+        const amount = parseInt(amountStr);
+
+        if (isNaN(amount) || amount <= 0) {
+            return interaction.editReply({ content: '❌ Invalid amount. Must be a positive number.' });
+        }
+        
+        // Fetch the user to confirm the ID is valid
+        const targetUser = await client.users.fetch(targetId).catch(() => null);
+        if (!targetUser) {
+            return interaction.editReply({ content: `❌ Could not find a user with the ID \`${targetId}\`.` });
+        }
+
+        // --- IN-MEMORY BALANCE UPDATE ---
+        const newBalance = updateRobuxBalance(targetId, amount);
+        // -------------------------------
+        
+        // Optional: Send a DM to the staff member
+        await targetUser.send(`💰 An administrator (<@${interaction.user.id}>) manually added **${amount} R$** to your payout balance. Your new balance is **${newBalance} R$**.`).catch(e => console.error("Failed to DM staff member about manual addition:", e));
+
+        await interaction.editReply({ 
+            content: `✅ Successfully added **${amount} R$** to **${targetUser.tag}** (<@${targetId}>). New Balance: **${newBalance} R$**.` 
+        });
+
+    } catch (error) {
+        console.error('Error handling manual Robux addition:', error);
+        await interaction.editReply({ content: 'An unexpected internal error occurred during the manual Robux addition. Check the bot logs for details.' });
     }
 }
 
@@ -640,7 +681,6 @@ async function createTicketChannel(interaction, ticketType, details = '') {
 
         if (!ticketCategory) {
              console.error(`Ticket category ID not found for type: ${ticketType}. Check environment variables.`);
-             // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
              return interaction.editReply({ content: 'Ticket category not configured. Please contact an admin.', flags: EPHEMERAL_FLAG });
         }
 
@@ -649,7 +689,6 @@ async function createTicketChannel(interaction, ticketType, details = '') {
             .find(log => log.creator_id === user.id && log.end_time === null)?.channel_id;
 
         if (openTicketChannelId) {
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             return interaction.editReply({ content: `You already have an open ticket: <#${openTicketChannelId}>.`, flags: EPHEMERAL_FLAG });
         }
         // -----------------------------------
@@ -724,7 +763,6 @@ async function createTicketChannel(interaction, ticketType, details = '') {
  * @param {ButtonInteraction} interaction
  */
 async function handleButton(interaction) {
-    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
     if (!interaction.inGuild()) return interaction.reply({ content: 'This action must be run in a server.', flags: EPHEMERAL_FLAG });
 
     const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID);
@@ -733,13 +771,11 @@ async function handleButton(interaction) {
     const customId = interaction.customId;
     
     // Defer the reply immediately to prevent the 3-second "Interaction Failed" error
-    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
     await interaction.deferReply({ flags: EPHEMERAL_FLAG }).catch(e => console.error("Failed to defer reply:", e));
 
     try {
         if (customId.startsWith('ticket_')) {
             // Check for general staff access on all ticket buttons
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             if (!isStaff && customId !== 'ticket_admin_delete') return interaction.editReply({ content: 'You must be a staff member to perform ticket actions.', flags: EPHEMERAL_FLAG });
 
             const channelId = interaction.channel.id;
@@ -750,7 +786,6 @@ async function handleButton(interaction) {
             
             // Allow ticket_admin_delete to run even if the ticket log is not found (for cleaning up old channels)
             if (!ticketLog && customId !== 'ticket_admin_delete') {
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', flags: EPHEMERAL_FLAG });
             }
             
@@ -761,34 +796,38 @@ async function handleButton(interaction) {
             switch (customId) {
                 case 'ticket_claim':
                 case 'ticket_unclaim':
-                    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                     if (is_soft_closed) return interaction.editReply({ content: 'Cannot change claim status on a soft-closed ticket.', flags: EPHEMERAL_FLAG });
                     await handleClaimUnclaimLogic(interaction, channelId, staffId, is_claimed, isCurrentClaimer, claimer_id);
                     break;
 
                 case 'ticket_soft_close':
-                    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                     if (!isCurrentClaimer && is_claimed) {
                         return interaction.editReply({ content: `❌ This ticket is claimed by <@${claimer_id}>. You must unclaim it or be the claimer to soft-close.`, flags: EPHEMERAL_FLAG });
                     }
+                    // NOTE: Robux is NO LONGER awarded here. It only triggers the admin approval request.
                     await handleSoftCloseLogic(interaction, channelId, staffId, false);
                     break;
 
                 case 'ticket_admin_delete':
-                    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                     if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can force delete tickets.', flags: EPHEMERAL_FLAG });
                     await handleDeleteLogic(interaction, channelId, staffId, false);
                     break;
                 
                 case 'ticket_finalize_delete':
-                    // FIX: Allow all staff to finalize (since they completed the soft-close)
-                    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                     if (!isStaff) return interaction.editReply({ content: 'You must be a staff member to finalize and delete tickets.', flags: EPHEMERAL_FLAG });
                     await handleDeleteLogic(interaction, channelId, staffId, false);
                     break;
             }
+        } 
+        // NEW: Handle ticket reward approvals
+        else if (customId.startsWith('ticket_reward_')) {
+            if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can approve or deny ticket rewards.', flags: EPHEMERAL_FLAG });
+            // Custom ID format: ticket_reward_approve_channelId_staffId_amount
+            const [action, , , channelId, staffId, amountStr] = customId.split('_'); 
+            const args = [channelId, staffId, amountStr];
+            await handleTicketRewardApproval(interaction, action, args);
+
         } else if (customId.startsWith('payout_')) {
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             if (!isAdmin) return interaction.editReply({ content: 'Only Administrators can approve or deny payout requests.', flags: EPHEMERAL_FLAG });
             const [action, , staffId, amountStr] = customId.split('_');
             const args = [staffId, amountStr];
@@ -797,14 +836,13 @@ async function handleButton(interaction) {
     } catch (error) {
         console.error(`❌ CRITICAL ERROR IN BUTTON HANDLER (${customId}) for channel ${interaction.channel.id}:`, error);
         await interaction.editReply({ 
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             content: `❌ A critical error occurred during this action. Please check the bot's console logs immediately. Error: \`${error.message}\``, 
             flags: EPHEMERAL_FLAG
         }).catch(() => console.error("Failed to send error reply to user."));
     }
 }
 
-// --- Claim/Unclaim Logic ---
+// --- Claim/Unclaim Logic (No Change) ---
 
 /**
  * Sets up the unclaim timeout when the user messages in a claimed channel.
@@ -929,7 +967,6 @@ async function unclaimTicket(guild, channelId, initialMessageId) {
 async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaimed, isCurrentClaimer, claimer_id) {
     const channel = interaction.channel;
     const log = getActiveTicketLog(channelId);
-    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
     if (!log) return interaction.editReply({ content: 'Ticket log not found for this channel.', flags: EPHEMERAL_FLAG });
 
     if (isClaimed) {
@@ -937,11 +974,9 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
         if (isCurrentClaimer) {
             const initialMessageId = interaction.message.id;
             await unclaimTicket(interaction.guild, channelId, initialMessageId);
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             await interaction.editReply({ content: '✅ You have **unclaimed** this ticket. All staff can now respond.', flags: EPHEMERAL_FLAG });
             await channel.send(`🔓 <@${staffId}> has **unclaimed** this ticket. It is now available for any staff member.`);
         } else {
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             return interaction.editReply({ content: `❌ This ticket is claimed by <@${claimer_id}>. Only they can unclaim it.`, flags: EPHEMERAL_FLAG });
         }
     } else {
@@ -973,7 +1008,6 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
             const newRow = getTicketActionRow(true, log.is_soft_closed); // isClaimed: true
             await interaction.message.edit({ components: [newRow] });
 
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             await interaction.editReply({ content: '✅ You have **claimed** this ticket. Other staff members cannot type here until you unclaim it.', flags: EPHEMERAL_FLAG });
             await channel.send(`🔒 <@${staffId}> has **claimed** this ticket and is taking over.`);
         } catch (error) {
@@ -986,7 +1020,6 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
             // Check if the error is a permission issue
             if (error.code === 50013) {
                 return interaction.editReply({ 
-                    // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                     content: '❌ Claim Failed: The bot is missing permissions to **edit channel permissions** (Manage Roles) or **edit the initial ticket message**.', 
                     flags: EPHEMERAL_FLAG
                 });
@@ -997,10 +1030,10 @@ async function handleClaimUnclaimLogic(interaction, channelId, staffId, isClaime
 }
 
 
-// --- Soft Close (Robux Add) Logic ---
+// --- Soft Close (Reward Request) Logic ---
 
 /**
- * Handles the soft close action (adds Robux, locks channel, updates buttons to Delete).
+ * Handles the soft close action (sends reward request, locks channel, updates buttons to Delete).
  * @param {Interaction} interaction - The button/slash command interaction.
  * @param {string} channelId
  * @param {string} staffId
@@ -1011,14 +1044,12 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
     const log = getActiveTicketLog(channelId);
 
     if (!log) {
-        // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
         return interaction.editReply({ content: 'This channel is not an active ticket (or already finalized).', flags: EPHEMERAL_FLAG });
     }
 
     const { creator_id, ticket_type, is_soft_closed } = log;
 
     if (is_soft_closed) {
-        // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
         return interaction.editReply({ content: 'This ticket is already soft-closed. Use the **Finalize & Delete** button to complete the process.', flags: EPHEMERAL_FLAG });
     }
     
@@ -1033,24 +1064,66 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
         
         const robuxValue = PAYOUT_VALUES[ticket_type] || 0;
 
-        // 2. Add Robux and Log Close (Update In-Memory Log)
+        // 2. Mark as soft-closed (Update In-Memory Log)
         log.is_soft_closed = true;
+        log.claimer_id = staffId; // Record who closed it for reward purposes
         ticketLogs.set(channelId, log); // Store updated log
+        
+        // 3. Send Reward Approval Request to Admin Channel
+        const approvalChannel = client.channels.cache.get(ADMIN_APPROVAL_CHANNEL_ID);
 
-        const newBalance = updateRobuxBalance(staffId, robuxValue);
+        if (approvalChannel) {
+            const approvalEmbed = new EmbedBuilder()
+                .setTitle('✅ TICKET REWARD APPROVAL REQUEST')
+                .setColor('#3498DB')
+                .setDescription(`
+                    **Ticket:** <#${channelId}> (${interaction.channel.name})
+                    **Type:** ${ticket_type}
+                    **Staff Closer:** <@${staffId}>
+                    **Reward Amount:** **${robuxValue} R$**
+                    
+                    *Admin action is required to award the Robux.*
+                `)
+                .addFields(
+                    { name: 'Ticket Channel ID', value: channelId, inline: true },
+                    { name: 'Staff ID', value: staffId, inline: true }
+                )
+                .setTimestamp();
 
-        // 3. Update Buttons (Close -> Finalize & Delete)
+            const approveButton = new ButtonBuilder()
+                // NEW CUSTOM ID: ticket_reward_approve_[channelId]_[staffId]_[amount]
+                .setCustomId(`ticket_reward_approve_${channelId}_${staffId}_${robuxValue}`)
+                .setLabel('✅ Approve Reward')
+                .setStyle(ButtonStyle.Success);
+
+            const denyButton = new ButtonBuilder()
+                .setCustomId(`ticket_reward_deny_${channelId}_${staffId}`)
+                .setLabel('❌ Deny Reward')
+                .setStyle(ButtonStyle.Danger);
+
+            const row = new ActionRowBuilder().addComponents(approveButton, denyButton);
+
+            await approvalChannel.send({
+                content: `🚨 <@&${ADMIN_ROLE_ID}> New Ticket Reward Approval Needed`,
+                embeds: [approvalEmbed],
+                components: [row]
+            });
+        } else {
+            console.error(`ADMIN_APPROVAL_CHANNEL_ID: ${ADMIN_APPROVAL_CHANNEL_ID} not found. Reward approval skipped.`);
+        }
+
+        // 4. Update Buttons (Close -> Finalize & Delete)
         const initialMessage = interaction.message || (await interaction.channel.messages.fetchPinned()).first();
 
         if (initialMessage) {
             const newRow = getTicketActionRow(false, true); // isClaimed: false, isSoftClosed: true
             await initialMessage.edit({
-                content: `**Ticket Soft-Closed by ${interaction.user.tag}** | Ready for final deletion.`,
+                content: `**Ticket Soft-Closed by ${interaction.user.tag}** | Reward request sent to Admin channel. Ready for final deletion.`,
                 components: [newRow]
             }).catch(e => console.error("Error editing initial message for soft close:", e));
         }
         
-        // 4. Lock permissions (deny creator and staff send access)
+        // 5. Lock permissions (deny creator and staff send access)
         if (creator_id) {
              await interaction.channel.permissionOverwrites.edit(creator_id, { SendMessages: false });
         }
@@ -1061,13 +1134,12 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
         }
 
 
-        // 5. Send confirmation
-        const replyContent = `✅ Ticket soft-closed. **${robuxValue} R$** added to your balance (New Balance: **${newBalance} R$**). The channel is now locked. Use **Finalize & Delete** to remove the channel.`;
+        // 6. Send confirmation
+        const replyContent = `✅ Ticket soft-closed. A reward request for **${robuxValue} R$** has been sent for Admin approval. The channel is now locked. Use **Finalize & Delete** to remove the channel.`;
         
         if (isSlashCommand) {
             await interaction.editReply({ content: replyContent });
         } else {
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             await interaction.editReply({ content: replyContent, flags: EPHEMERAL_FLAG });
             await interaction.channel.send(`💾 <@${staffId}> has **soft-closed** this ticket. It is now locked and awaiting final deletion.`);
         }
@@ -1077,11 +1149,9 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
         // Rollback state on failure
         log.is_soft_closed = false;
         ticketLogs.set(channelId, log);
-        updateRobuxBalance(staffId, -PAYOUT_VALUES[ticket_type] || 0);
         
         if (error.code === 50013) {
             return interaction.editReply({ 
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 content: '❌ Soft Close Failed: The bot is missing permissions to **edit channel permissions** (Manage Roles) or **edit the initial ticket message**.', 
                 flags: EPHEMERAL_FLAG
             });
@@ -1090,7 +1160,8 @@ async function handleSoftCloseLogic(interaction, channelId, staffId, isSlashComm
     }
 }
 
-// --- Hard Delete (Transcript + Delete Channel) Logic ---
+
+// --- Hard Delete (Transcript + Delete Channel) Logic (No Change) ---
 
 /**
  * Handles the hard delete action (transcript, in-memory update, channel delete).
@@ -1108,8 +1179,7 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
     
     // Check if the ticket should be soft-closed first (only applies to Finalize & Delete button)
     if (isFinalizeDelete && !log.is_soft_closed) {
-        // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
-        return interaction.editReply({ content: 'This ticket must be soft-closed first (which adds Robux) before finalizing the delete process.', flags: EPHEMERAL_FLAG });
+        return interaction.editReply({ content: 'This ticket must be soft-closed first (which sends the reward request) before finalizing the delete process.', flags: EPHEMERAL_FLAG });
     }
     
     try {
@@ -1118,7 +1188,6 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
 
         // 2. Fetch all messages for transcript
         const creator = await interaction.guild.members.fetch(log.creator_id).catch(() => ({ user: { tag: 'Unknown User' } }));
-        // FIX: Discord API limit is 100 messages per fetch.
         const messages = await channel.messages.fetch({ limit: 100 }); 
         const sortedMessages = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
         const htmlContent = generateHtmlTranscript(sortedMessages, creator);
@@ -1160,7 +1229,6 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
         if (isSlashCommand) {
             await interaction.editReply({ content: finalReply });
         } else {
-            // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
             await interaction.editReply({ content: finalReply, flags: EPHEMERAL_FLAG });
         }
 
@@ -1173,7 +1241,6 @@ async function handleDeleteLogic(interaction, channelId, staffId, isSlashCommand
          console.error('Error during Hard Delete logic:', error);
          if (error.code === 50013) {
             return interaction.editReply({ 
-                // FIX: Replaced ephemeral: true with flags: EPHEMERAL_FLAG
                 content: '❌ Delete Failed: The bot is missing permissions to **delete the channel** (Manage Channels) or **send messages in the Transcript Log Channel**.', 
                 flags: EPHEMERAL_FLAG
             });
@@ -1259,6 +1326,50 @@ async function handlePayoutApproval(interaction, action, args) {
         }
         
         throw error; // Re-throw to be caught by the general handler
+    }
+}
+
+/**
+ * NEW: Handles the approval or denial of a soft-closed ticket reward.
+ * @param {ButtonInteraction} interaction
+ * @param {string} action 'ticket_reward_approve' or 'ticket_reward_deny'.
+ * @param {string[]} args Array containing [channelId, staffId, amount].
+ */
+async function handleTicketRewardApproval(interaction, action, args) {
+    const [channelId, staffId, amountStr] = args;
+    const amount = parseInt(amountStr);
+    const approverId = interaction.user.id;
+    const isApproval = action === 'ticket_reward_approve';
+
+    try {
+        // Disable buttons immediately
+        const disabledRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('reward_status').setLabel(isApproval ? '✅ Reward Approved' : '❌ Reward Denied').setStyle(isApproval ? ButtonStyle.Success : ButtonStyle.Danger).setDisabled(true)
+        );
+        await interaction.message.edit({ components: [disabledRow] });
+
+        if (isApproval) {
+            // 1. Award Robux
+            const newBalance = updateRobuxBalance(staffId, amount);
+
+            // 2. Notify Staff Member
+            const staffMember = await client.users.fetch(staffId);
+            // We use client.users.fetch() to ensure we can DM the user
+            await staffMember.send(`✅ Your reward for closing ticket **#${interaction.channel.name}** has been **APPROVED** by <@${approverId}>! **${amount} R$** added to your balance. Your new balance is **${newBalance} R$**.`).catch(e => console.error("Failed to DM staff member on reward approval:", e));
+
+            // 3. Final Confirmation
+            await interaction.editReply({ content: `✅ Reward of **${amount} R$** for ticket in <#${channelId}> approved and awarded to <@${staffId}>. New Balance: ${newBalance} R$.` });
+        } else {
+            // 1. Notify Staff Member
+            const staffMember = await client.users.fetch(staffId);
+            await staffMember.send(`❌ Your reward request for closing ticket **#${interaction.channel.name}** has been **DENIED** by <@${approverId}>. You will not receive the ${amount} R$ reward.`).catch(e => console.error("Failed to DM staff member on reward denial:", e));
+
+            // 2. Final Confirmation
+            await interaction.editReply({ content: `❌ Reward for ticket in <#${channelId}> denied. No Robux awarded to <@${staffId}>.` });
+        }
+    } catch (error) {
+        console.error('Error during ticket reward approval:', error);
+        await interaction.editReply({ content: 'An internal error occurred while processing the ticket reward approval.' });
     }
 }
 
