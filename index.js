@@ -126,6 +126,16 @@ async function registerSlashCommands(clientId) {
             name: 'delete-ticket',
             description: 'ADMIN ONLY: Generate transcript and finalize/delete the ticket.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
+        },
+        {
+            name: 'payout-stats',
+            description: 'ADMIN ONLY: View comprehensive payout statistics and data.',
+            default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
+        },
+        {
+            name: 'user-info',
+            description: 'ADMIN ONLY: View detailed information about a specific user.',
+            default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         }
     ];
 
@@ -427,6 +437,32 @@ async function handleSlashCommand(interaction) {
                 await interaction.deferReply({ flags: EPHEMERAL_FLAG });
                 await handleDeleteLogic(interaction, interaction.channel.id, interaction.user.id, true);
                 break;
+                
+            case 'payout-stats':
+                if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to use this command.', flags: EPHEMERAL_FLAG });
+                await interaction.deferReply({ flags: EPHEMERAL_FLAG });
+                await handlePayoutStatsCommand(interaction);
+                break;
+                
+            case 'user-info':
+                if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to use this command.', flags: EPHEMERAL_FLAG });
+                
+                const userInfoModal = new ModalBuilder()
+                    .setCustomId('user_info_modal')
+                    .setTitle('User Information Lookup');
+
+                const userIdInput = new TextInputBuilder()
+                    .setCustomId('lookup_user_id')
+                    .setLabel('User ID to lookup')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('Enter Discord User ID')
+                    .setRequired(true);
+
+                userInfoModal.addComponents(
+                    new ActionRowBuilder().addComponents(userIdInput)
+                );
+                await interaction.showModal(userInfoModal);
+                break;
         }
     } catch (error) {
         console.error(`Error processing slash command /${interaction.commandName}:`, error);
@@ -527,6 +563,10 @@ async function handleModalSubmit(interaction) {
         // NEW: Handle manual Robux addition
         else if (interaction.customId === 'add_robux_modal') {
             await handleManualRobuxAddition(interaction);
+        }
+        // NEW: Handle user info lookup
+        else if (interaction.customId === 'user_info_modal') {
+            await handleUserInfoLookup(interaction);
         }
     } catch (error) {
          console.error('Error processing modal submission (likely during channel creation):', error);
@@ -649,6 +689,167 @@ async function handlePayoutRequest(interaction) {
     } catch (error) {
         console.error('Error handling payout request:', error);
         await interaction.editReply({ content: 'An unexpected internal error occurred during the payout request process. Check the bot logs for details.' });
+    }
+}
+
+/**
+ * Handles the payout statistics command for admins.
+ * @param {CommandInteraction} interaction
+ */
+async function handlePayoutStatsCommand(interaction) {
+    try {
+        // Calculate overall statistics
+        const totalTransactions = transactionLogs.length;
+        const totalRobuxPaid = transactionLogs.reduce((sum, log) => sum + log.amount_paid, 0);
+        const totalActiveStaff = staffData.size;
+        const totalCurrentBalance = Array.from(staffData.values()).reduce((sum, data) => sum + data.robux_balance, 0);
+        
+        // Get top earners (by current balance)
+        const topEarners = Array.from(staffData.entries())
+            .sort(([,a], [,b]) => b.robux_balance - a.robux_balance)
+            .slice(0, 5)
+            .map(([userId, data]) => ({ userId, balance: data.robux_balance }));
+        
+        // Get recent transactions (last 10)
+        const recentTransactions = transactionLogs
+            .slice(-10)
+            .reverse()
+            .map(log => {
+                const date = new Date(log.transaction_date).toLocaleDateString();
+                return `**${log.amount_paid} R$** to <@${log.staff_id}> (${date})`;
+            });
+        
+        const statsEmbed = new EmbedBuilder()
+            .setTitle('📊 Payout Statistics Dashboard')
+            .setColor('#9b59b6')
+            .setDescription('Comprehensive overview of the payout system')
+            .addFields(
+                {
+                    name: '💰 Financial Overview',
+                    value: `**Total Transactions:** ${totalTransactions}\n**Total Robux Paid:** ${totalRobuxPaid} R$\n**Current Staff Balances:** ${totalCurrentBalance} R$`,
+                    inline: true
+                },
+                {
+                    name: '👥 Staff Overview',
+                    value: `**Active Staff Members:** ${totalActiveStaff}\n**Average Balance:** ${totalActiveStaff > 0 ? Math.round(totalCurrentBalance / totalActiveStaff) : 0} R$`,
+                    inline: true
+                },
+                {
+                    name: '🏆 Top Current Balances',
+                    value: topEarners.length > 0 
+                        ? topEarners.map((earner, index) => `${index + 1}. <@${earner.userId}>: **${earner.balance} R$**`).join('\n')
+                        : 'No staff members found',
+                    inline: false
+                },
+                {
+                    name: '📋 Recent Transactions',
+                    value: recentTransactions.length > 0 
+                        ? recentTransactions.slice(0, 5).join('\n')
+                        : 'No transactions found',
+                    inline: false
+                }
+            )
+            .setFooter({ text: 'Data stored in memory - resets on bot restart' })
+            .setTimestamp();
+        
+        await interaction.editReply({ embeds: [statsEmbed] });
+        
+    } catch (error) {
+        console.error('Error in handlePayoutStatsCommand:', error);
+        await interaction.editReply({ content: 'An error occurred while fetching payout statistics.' });
+    }
+}
+
+/**
+ * Handles user information lookup modal submission.
+ * @param {ModalSubmitInteraction} interaction
+ */
+async function handleUserInfoLookup(interaction) {
+    try {
+        const userId = interaction.fields.getTextInputValue('lookup_user_id');
+        
+        // Fetch user data
+        const userData = staffData.get(userId);
+        const userTransactions = transactionLogs.filter(log => log.staff_id === userId);
+        const userTickets = Array.from(ticketLogs.values()).filter(log => log.creator_id === userId);
+        
+        // Try to fetch Discord user
+        const discordUser = await client.users.fetch(userId).catch(() => null);
+        
+        if (!userData && userTransactions.length === 0 && userTickets.length === 0) {
+            return interaction.editReply({ content: `❌ No data found for user ID: \`${userId}\`` });
+        }
+        
+        // Calculate statistics
+        const currentBalance = userData ? userData.robux_balance : 0;
+        const totalPaidOut = userTransactions.reduce((sum, log) => sum + log.amount_paid, 0);
+        const totalTicketsCreated = userTickets.length;
+        const completedTickets = userTickets.filter(log => log.end_time !== null).length;
+        
+        // Recent activity
+        const recentTransactions = userTransactions
+            .slice(-5)
+            .reverse()
+            .map(log => {
+                const date = new Date(log.transaction_date).toLocaleDateString();
+                return `**${log.amount_paid} R$** on ${date}`;
+            });
+        
+        const recentTickets = userTickets
+            .slice(-3)
+            .reverse()
+            .map(log => {
+                const date = new Date(log.start_time).toLocaleDateString();
+                const status = log.end_time ? '✅ Completed' : '🔄 Active';
+                return `${status} **${log.ticket_type}** (${date})`;
+            });
+        
+        const userInfoEmbed = new EmbedBuilder()
+            .setTitle(`👤 User Information: ${discordUser ? discordUser.tag : 'Unknown User'}`)
+            .setColor('#3498db')
+            .setDescription(`Detailed information for user ID: \`${userId}\``)
+            .addFields(
+                {
+                    name: '💰 Robux Information',
+                    value: `**Current Balance:** ${currentBalance} R$\n**Total Paid Out:** ${totalPaidOut} R$\n**Total Transactions:** ${userTransactions.length}`,
+                    inline: true
+                },
+                {
+                    name: '🎫 Ticket Information',
+                    value: `**Total Tickets:** ${totalTicketsCreated}\n**Completed:** ${completedTickets}\n**Active:** ${totalTicketsCreated - completedTickets}`,
+                    inline: true
+                },
+                {
+                    name: '📊 Activity Summary',
+                    value: `**First Seen:** ${userTickets.length > 0 ? new Date(Math.min(...userTickets.map(t => new Date(t.start_time)))).toLocaleDateString() : 'N/A'}\n**Last Transaction:** ${userTransactions.length > 0 ? new Date(userTransactions[userTransactions.length - 1].transaction_date).toLocaleDateString() : 'N/A'}`,
+                    inline: false
+                }
+            )
+            .setThumbnail(discordUser ? discordUser.displayAvatarURL() : null)
+            .setFooter({ text: 'User data from in-memory storage' })
+            .setTimestamp();
+        
+        if (recentTransactions.length > 0) {
+            userInfoEmbed.addFields({
+                name: '💳 Recent Payouts',
+                value: recentTransactions.join('\n'),
+                inline: false
+            });
+        }
+        
+        if (recentTickets.length > 0) {
+            userInfoEmbed.addFields({
+                name: '🎫 Recent Tickets',
+                value: recentTickets.join('\n'),
+                inline: false
+            });
+        }
+        
+        await interaction.editReply({ embeds: [userInfoEmbed] });
+        
+    } catch (error) {
+        console.error('Error in handleUserInfoLookup:', error);
+        await interaction.editReply({ content: 'An error occurred while looking up user information.' });
     }
 }
 
