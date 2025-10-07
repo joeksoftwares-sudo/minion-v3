@@ -437,7 +437,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'level',
-            description: '📈 Check your server activity level and XP!',
+            description: '📈 Check your server level and XP!',
         },
         {
             name: 'daily',
@@ -453,11 +453,11 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'gift',
-            description: '🎁 Send a virtual gift to another user!',
+            description: '🎁 Send a virtual gift to user!',
         },
         {
             name: 'economy',
-            description: '💰 Check the server\'s virtual economy stats!',
+            description: '💰 Check server economy stats!',
         },
         {
             name: 'work',
@@ -465,11 +465,11 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'rob',
-            description: '🔪 Try to rob another user (virtual fun)!',
+            description: '🔪 Try to rob another user (virtual)!',
         },
         {
             name: 'gamble',
-            description: '🎲 Gamble your coins for a chance to win big!',
+            description: '🎲 Gamble coins for a chance to win!',
         },
         {
             name: 'bank',
@@ -481,7 +481,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'divorce',
-            description: '💔 File for divorce (virtual relationships)!',
+            description: '💔 File for divorce (virtual)!',
         },
         {
             name: 'adopt',
@@ -497,7 +497,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'fish',
-            description: '🎣 Go fishing and catch virtual fish!',
+            description: '🎣 Go fishing for virtual fish!',
         },
         {
             name: 'hunt',
@@ -513,7 +513,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'battle',
-            description: '⚔️ Battle other users with your items!',
+            description: '⚔️ Battle other users!',
         },
         {
             name: 'duel',
@@ -537,7 +537,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'raid',
-            description: '🐉 Join or start a raid against a boss!',
+            description: '🐉 Join or start a boss raid!',
         },
         {
             name: 'guild',
@@ -581,7 +581,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'auction',
-            description: '🔨 Auction your items to the highest bidder!',
+            description: '🔨 Auction items to highest bidder!',
         },
         {
             name: 'market',
@@ -589,7 +589,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'news',
-            description: '📰 Get the latest server news and updates!',
+            description: '📰 Get latest server news!',
         },
         {
             name: 'events',
@@ -597,15 +597,15 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'birthday',
-            description: '🎂 Set your birthday for special celebrations!',
+            description: '🎂 Set your birthday for celebrations!',
         },
         {
             name: 'timezone',
-            description: '🌍 Set your timezone for better coordination!',
+            description: '🌍 Set your timezone for coordination!',
         },
         {
             name: 'afk',
-            description: '😴 Set yourself as AFK with a custom message!',
+            description: '😴 Set yourself as AFK with message!',
         },
         {
             name: 'status',
@@ -637,7 +637,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'activity',
-            description: '🎮 Set what activity you\'re currently doing!',
+            description: '🎮 Set your current activity!',
         },
         {
             name: 'bio',
@@ -645,7 +645,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'social',
-            description: '🔗 Add your social media links to your profile!',
+            description: '🔗 Add social links to profile!',
         },
         {
             name: 'playlist',
@@ -665,7 +665,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'emote',
-            description: '😄 Use custom server emotes and reactions!',
+            description: '😄 Use custom server emotes!',
         },
         {
             name: 'gif',
@@ -697,7 +697,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'confession',
-            description: '💭 Submit an anonymous confession!',
+            description: '💭 Submit anonymous confession!',
         },
         {
             name: 'suggestion',
@@ -705,7 +705,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'report',
-            description: '⚠️ Report a user or issue to moderators!',
+            description: '⚠️ Report user or issue to mods!',
         },
         {
             name: 'feedback',
@@ -717,7 +717,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'subscribe',
-            description: '🔔 Subscribe to server notifications!',
+            description: '🔔 Subscribe to notifications!',
         },
         {
             name: 'bookmark',
@@ -725,7 +725,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'notes',
-            description: '📋 Create and manage personal notes!',
+            description: '📋 Create and manage notes!',
         },
         {
             name: 'todo',
@@ -753,15 +753,15 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'worldclock',
-            description: '🌍 Check the time in different time zones!',
+            description: '🌍 Check time in different zones!',
         },
         {
             name: 'uptime',
-            description: '🕐 Check how long the bot has been running!',
+            description: '🕐 Check bot uptime!',
         },
         {
             name: 'ping',
-            description: '🏓 Check the bot\'s response time!',
+            description: '🏓 Check bot response time!',
         },
         {
             name: 'botinfo',
@@ -769,7 +769,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'version',
-            description: '📊 Check the bot\'s version and changelog!',
+            description: '📊 Check bot version and changelog!',
         },
         {
             name: 'help',
@@ -781,7 +781,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'support',
-            description: '🆘 Get support and contact information!',
+            description: '🆘 Get support and contact info!',
         },
         {
             name: 'credits',
@@ -789,7 +789,7 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'changelog',
-            description: '📋 View recent bot updates and changes!',
+            description: '📋 View recent updates!',
         }
     ];
 
