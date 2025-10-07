@@ -187,45 +187,609 @@ async function registerSlashCommands(clientId) {
         },
         {
             name: 'add-robux',
-            description: 'ADMIN: Add Robux to staff balance.',
+            description: 'ADMIN ONLY: Manually add Robux to staff balance.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'remove-robux',
-            description: 'ADMIN: Remove Robux from staff balance.',
+            description: 'ADMIN ONLY: Remove Robux from staff balance.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'panel',
-            description: 'ADMIN: Deploy the ticket panel.',
+            description: 'ADMIN ONLY: Deploys the persistent ticket panel.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'close-ticket',
-            description: 'STAFF: Close ticket and send reward request.',
+            description: 'STAFF ONLY: Soft-close ticket (sends reward request).',
         },
         {
             name: 'delete-ticket',
-            description: 'ADMIN: Generate transcript and delete ticket.',
+            description: 'ADMIN ONLY: Generate transcript and delete ticket.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'payout-stats',
-            description: 'ADMIN: View payout statistics.',
+            description: 'ADMIN ONLY: View payout statistics and data.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
             name: 'user-info',
-            description: 'ADMIN: View user information.',
+            description: 'ADMIN ONLY: View user information.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
+            name: 'roll',
+            description: '🎲 Roll dice with custom sides!',
+        },
+        {
+            name: 'coinflip',
+            description: '🪙 Flip a coin and test your luck!',
+        },
+        {
+            name: '8ball',
+            description: '🎱 Ask the magic 8-ball a question!',
+        },
+        {
+            name: 'rps',
+            description: '✂️ Play Rock, Paper, Scissors!',
+        },
+        {
+            name: 'joke',
+            description: '😂 Get a random joke to brighten your day!',
+        },
+        {
+            name: 'quote',
+            description: '💭 Get an inspirational quote!',
+        },
+        {
+            name: 'meme',
+            description: '😎 Generate a random meme title!',
+        },
+        {
+            name: 'weather',
+            description: '🌤️ Check the weather for any city!',
+        },
+        {
+            name: 'fact',
+            description: '🧠 Learn a random interesting fact!',
+        },
+        {
+            name: 'password',
+            description: '🔐 Generate a secure random password!',
+        },
+        {
+            name: 'color',
+            description: '🎨 Generate a random color with hex code!',
+        },
+        {
+            name: 'avatar',
+            description: '🖼️ Get someone\'s avatar in full resolution!',
+        },
+        {
+            name: 'serverinfo',
+            description: '📊 Get server information!',
+        },
+        {
+            name: 'userprofile',
+            description: '👤 Get user profile info!',
+        },
+        {
+            name: 'poll',
+            description: '📊 Create a poll with up to 10 options!',
+        },
+        {
+            name: 'timer',
+            description: '⏰ Set a timer and get reminded!',
+        },
+        {
+            name: 'reminder',
+            description: '📝 Set a reminder for later!',
+        },
+        {
+            name: 'calculate',
+            description: '🧮 Perform mathematical calculations!',
+        },
+        {
+            name: 'morse',
+            description: '📡 Convert text to/from Morse code!',
+        },
+        {
+            name: 'binary',
+            description: '💾 Convert text to/from binary!',
+        },
+        {
+            name: 'base64',
+            description: '🔐 Encode/decode text in Base64!',
+        },
+        {
+            name: 'qr',
+            description: '📱 Generate a QR code for any text!',
+        },
+        {
+            name: 'ascii',
+            description: '📝 Convert text to ASCII art!',
+        },
+        {
+            name: 'reverse',
+            description: '🔄 Reverse any text!',
+        },
+        {
+            name: 'scramble',
+            description: '🔀 Scramble the letters in text!',
+        },
+        {
+            name: 'wordcount',
+            description: '📏 Count words and characters in text!',
+        },
+        {
+            name: 'translate',
+            description: '🌍 Translate text between languages!',
+        },
+        {
+            name: 'urban',
+            description: '📚 Look up a term in Urban Dictionary!',
+        },
+        {
+            name: 'wikipedia',
+            description: '📖 Search Wikipedia for information!',
+        },
+        {
+            name: 'cat',
+            description: '🐱 Get a random cute cat picture!',
+        },
+        {
+            name: 'dog',
+            description: '🐶 Get a random cute dog picture!',
+        },
+        {
+            name: 'pokemon',
+            description: '⚡ Get Pokémon information!',
+        },
+        {
+            name: 'horoscope',
+            description: '⭐ Get your daily horoscope!',
+        },
+        {
+            name: 'number',
+            description: '🔢 Get an interesting number fact!',
+        },
+        {
+            name: 'compliment',
+            description: '💖 Get or give a nice compliment!',
+        },
+        {
+            name: 'insult',
+            description: '😈 Get a creative (harmless) insult!',
+        },
+        {
+            name: 'advice',
+            description: '💡 Get some random life advice!',
+        },
+        {
+            name: 'achievement',
+            description: '🏆 Generate a Minecraft achievement!',
+        },
+        {
+            name: 'ship',
+            description: '💕 Ship two users and see compatibility!',
+        },
+        {
+            name: 'rate',
+            description: '⭐ Rate anything from 1-10!',
+        },
+        {
+            name: 'choose',
+            description: '🤔 Let the bot choose between options!',
+        },
+        {
+            name: 'roast',
+            description: '🔥 Get roasted by the bot (all fun)!',
+        },
+        {
+            name: 'trivia',
+            description: '🧩 Answer a random trivia question!',
+        },
+        {
+            name: 'riddle',
+            description: '🧩 Get a riddle to solve!',
+        },
+        {
+            name: 'anagram',
+            description: '🔤 Find anagrams of a word!',
+        },
+        {
+            name: 'rhyme',
+            description: '🎵 Find words that rhyme!',
+        },
+        {
+            name: 'fizzbuzz',
+            description: '🎮 Play the classic FizzBuzz game!',
+        },
+        {
+            name: 'simon',
+            description: '🎵 Play Simon Says memory game!',
+        },
+        {
+            name: 'hangman',
+            description: '🎪 Play a word guessing game!',
+        },
+        {
+            name: 'wordle',
+            description: '📝 Play a Wordle-style word game!',
+        },
+        {
+            name: 'blackjack',
+            description: '🃏 Play Blackjack against the dealer!',
+        },
+        {
+            name: 'slots',
+            description: '🎰 Try your luck at the slot machine!',
+        },
+        {
+            name: 'lottery',
+            description: '🎫 Buy a lottery ticket and see if you win!',
+        },
+        {
+            name: 'leaderboard',
+            description: '🏅 View the server leaderboard!',
+        },
+        {
+            name: 'level',
+            description: '📈 Check your server level and XP!',
+        },
+        {
+            name: 'daily',
+            description: '📅 Claim your daily reward!',
+        },
+        {
+            name: 'inventory',
+            description: '🎒 Check your virtual inventory!',
+        },
+        {
+            name: 'shop',
+            description: '🛒 Browse the virtual item shop!',
+        },
+        {
+            name: 'gift',
+            description: '🎁 Send a virtual gift to user!',
+        },
+        {
+            name: 'economy',
+            description: '💰 Check server economy stats!',
+        },
+        {
+            name: 'work',
+            description: '💼 Do some virtual work to earn coins!',
+        },
+        {
+            name: 'rob',
+            description: '🔪 Try to rob another user (virtual)!',
+        },
+        {
+            name: 'gamble',
+            description: '🎲 Gamble coins for a chance to win!',
+        },
+        {
+            name: 'bank',
+            description: '🏦 Manage your virtual bank account!',
+        },
+        {
+            name: 'marry',
+            description: '💒 Propose marriage to another user!',
+        },
+        {
+            name: 'divorce',
+            description: '💔 File for divorce (virtual)!',
+        },
+        {
+            name: 'adopt',
+            description: '👶 Adopt a virtual pet!',
+        },
+        {
+            name: 'pet',
+            description: '🐾 Interact with your virtual pets!',
+        },
+        {
+            name: 'feed',
+            description: '🍖 Feed your virtual pets!',
+        },
+        {
+            name: 'fish',
+            description: '🎣 Go fishing for virtual fish!',
+        },
+        {
+            name: 'hunt',
+            description: '🏹 Go hunting for virtual animals!',
+        },
+        {
+            name: 'mine',
+            description: '⛏️ Mine for virtual resources!',
+        },
+        {
+            name: 'craft',
+            description: '🔨 Craft items from your resources!',
+        },
+        {
+            name: 'battle',
+            description: '⚔️ Battle other users!',
+        },
+        {
+            name: 'duel',
+            description: '🤺 Challenge someone to a duel!',
+        },
+        {
+            name: 'stats',
+            description: '📊 View your game statistics!',
+        },
+        {
+            name: 'achievements',
+            description: '🏅 View all available achievements!',
+        },
+        {
+            name: 'quest',
+            description: '🗺️ Start or check your current quest!',
+        },
+        {
+            name: 'dungeon',
+            description: '🏰 Explore a dangerous dungeon!',
+        },
+        {
+            name: 'raid',
+            description: '🐉 Join or start a boss raid!',
+        },
+        {
+            name: 'guild',
+            description: '⚔️ Manage your adventure guild!',
+        },
+        {
+            name: 'magic',
+            description: '🔮 Cast magical spells!',
+        },
+        {
+            name: 'potion',
+            description: '🧪 Brew and use magical potions!',
+        },
+        {
+            name: 'spell',
+            description: '✨ Learn and cast new spells!',
+        },
+        {
+            name: 'enchant',
+            description: '⚡ Enchant your weapons and armor!',
+        },
+        {
+            name: 'arena',
+            description: '🏟️ Fight in the arena for glory!',
+        },
+        {
+            name: 'tournament',
+            description: '🏆 Join or create tournaments!',
+        },
+        {
+            name: 'clan',
+            description: '🛡️ Create or join a clan!',
+        },
+        {
+            name: 'war',
+            description: '⚔️ Declare war between clans!',
+        },
+        {
+            name: 'trade',
+            description: '🤝 Trade items with other users!',
+        },
+        {
+            name: 'auction',
+            description: '🔨 Auction items to highest bidder!',
+        },
+        {
+            name: 'market',
+            description: '🏪 Browse the user marketplace!',
+        },
+        {
+            name: 'news',
+            description: '📰 Get latest server news!',
+        },
+        {
+            name: 'events',
+            description: '🎉 Check upcoming server events!',
+        },
+        {
+            name: 'birthday',
+            description: '🎂 Set your birthday for celebrations!',
+        },
+        {
+            name: 'timezone',
+            description: '🌍 Set your timezone for coordination!',
+        },
+        {
+            name: 'afk',
+            description: '😴 Set yourself as AFK with message!',
+        },
+        {
+            name: 'status',
+            description: '📝 Set a custom status message!',
+        },
+        {
+            name: 'badge',
+            description: '🎖️ View and equip your earned badges!',
+        },
+        {
+            name: 'title',
+            description: '👑 Set a custom title for your profile!',
+        },
+        {
+            name: 'background',
+            description: '🖼️ Set a custom background for your profile!',
+        },
+        {
+            name: 'theme',
+            description: '🎨 Change your profile theme colors!',
+        },
+        {
+            name: 'music',
+            description: '🎵 Set your favorite song on your profile!',
+        },
+        {
+            name: 'mood',
+            description: '😊 Set your current mood!',
+        },
+        {
+            name: 'activity',
+            description: '🎮 Set your current activity!',
+        },
+        {
+            name: 'bio',
+            description: '📝 Set a custom biography for your profile!',
+        },
+        {
+            name: 'social',
+            description: '🔗 Add social links to profile!',
+        },
+        {
+            name: 'playlist',
+            description: '🎶 Create and manage music playlists!',
+        },
+        {
+            name: 'radio',
+            description: '📻 Listen to virtual radio stations!',
+        },
+        {
+            name: 'karaoke',
+            description: '🎤 Host a karaoke session!',
+        },
+        {
+            name: 'dance',
+            description: '💃 Show off your dance moves!',
+        },
+        {
+            name: 'emote',
+            description: '😄 Use custom server emotes!',
+        },
+        {
+            name: 'gif',
+            description: '🎬 Search and share animated GIFs!',
+        },
+        {
+            name: 'sticker',
+            description: '🏷️ Use and create custom stickers!',
+        },
+        {
+            name: 'soundboard',
+            description: '🔊 Play sounds from the soundboard!',
+        },
+        {
+            name: 'voice',
+            description: '🎙️ Record and share voice messages!',
+        },
+        {
+            name: 'tts',
+            description: '🗣️ Convert text to speech!',
+        },
+        {
+            name: 'whisper',
+            description: '🤫 Send a private whisper to someone!',
+        },
+        {
+            name: 'shout',
+            description: '📢 Make an announcement to everyone!',
+        },
+        {
+            name: 'confession',
+            description: '💭 Submit anonymous confession!',
+        },
+        {
+            name: 'suggestion',
+            description: '💡 Submit a suggestion for the server!',
+        },
+        {
+            name: 'report',
+            description: '⚠️ Report user or issue to mods!',
+        },
+        {
+            name: 'feedback',
+            description: '📝 Leave feedback about the server!',
+        },
+        {
+            name: 'review',
+            description: '⭐ Review and rate the server!',
+        },
+        {
+            name: 'subscribe',
+            description: '🔔 Subscribe to notifications!',
+        },
+        {
+            name: 'bookmark',
+            description: '🔖 Bookmark messages for later!',
+        },
+        {
+            name: 'notes',
+            description: '📋 Create and manage notes!',
+        },
+        {
+            name: 'todo',
+            description: '✅ Manage your todo list!',
+        },
+        {
+            name: 'calendar',
+            description: '📅 View and manage your calendar!',
+        },
+        {
+            name: 'schedule',
+            description: '🗓️ Schedule events and meetings!',
+        },
+        {
+            name: 'alarm',
+            description: '⏰ Set multiple alarms!',
+        },
+        {
+            name: 'stopwatch',
+            description: '⏱️ Use a stopwatch for timing!',
+        },
+        {
+            name: 'countdown',
+            description: '⏳ Create countdown timers!',
+        },
+        {
+            name: 'worldclock',
+            description: '🌍 Check time in different zones!',
+        },
+        {
+            name: 'uptime',
+            description: '🕐 Check bot uptime!',
+        },
+        {
             name: 'ping',
-            description: 'Check bot response time!',
+            description: '🏓 Check bot response time!',
+        },
+        {
+            name: 'botinfo',
+            description: '🤖 Get information about the bot!',
+        },
+        {
+            name: 'version',
+            description: '📊 Check bot version and changelog!',
         },
         {
             name: 'help',
-            description: 'Get help with commands!',
+            description: '❓ Get help with bot commands!',
+        },
+        {
+            name: 'commands',
+            description: '📝 List all available commands!',
+        },
+        {
+            name: 'support',
+            description: '🆘 Get support and contact info!',
+        },
+        {
+            name: 'credits',
+            description: '👏 View bot credits and contributors!',
+        },
+        {
+            name: 'changelog',
+            description: '📋 View recent updates!',
         }
     ];
 
@@ -2585,4 +3149,3 @@ async function handleReminderCommand(interaction) { await interaction.reply('�
 async function handlePollCommand(interaction) { await interaction.reply('📊 Poll system coming soon!'); }
 
 client.login(DISCORD_TOKEN);
-
