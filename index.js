@@ -191,6 +191,11 @@ async function registerSlashCommands(clientId) {
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
         },
         {
+            name: 'remove-robux',
+            description: 'ADMIN ONLY: Remove Robux from staff balance.',
+            default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
+        },
+        {
             name: 'panel',
             description: 'ADMIN ONLY: Deploys the persistent ticket panel.',
             default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
@@ -1067,6 +1072,40 @@ async function handleSlashCommand(interaction) {
                 );
                 await interaction.showModal(addRobuxModal);
                 break;
+
+            case 'remove-robux':
+                if (!isAdmin) return interaction.reply({ content: 'You need Administrator permissions to use this command.', flags: EPHEMERAL_FLAG });
+                
+                const removeRobuxModal = new ModalBuilder()
+                    .setCustomId('remove_robux_modal')
+                    .setTitle('Remove Robux from Staff');
+
+                const removeTargetIdInput = new TextInputBuilder()
+                    .setCustomId('remove_target_user_id')
+                    .setLabel('Target Staff Member ID')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+
+                const amountToRemoveInput = new TextInputBuilder()
+                    .setCustomId('robux_amount_to_remove')
+                    .setLabel('Robux Amount to Remove (R$)')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+
+                const removalReasonInput = new TextInputBuilder()
+                    .setCustomId('removal_reason')
+                    .setLabel('Reason for Removal (Optional)')
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setRequired(false)
+                    .setMaxLength(500);
+
+                removeRobuxModal.addComponents(
+                    new ActionRowBuilder().addComponents(removeTargetIdInput),
+                    new ActionRowBuilder().addComponents(amountToRemoveInput),
+                    new ActionRowBuilder().addComponents(removalReasonInput)
+                );
+                await interaction.showModal(removeRobuxModal);
+                break;
                 
             case 'close-ticket':
                 if (!isStaff) return interaction.reply({ content: 'You must be staff to use this command.', flags: EPHEMERAL_FLAG });
@@ -1632,6 +1671,9 @@ async function handleModalSubmit(interaction) {
         else if (interaction.customId === 'add_robux_modal') {
             await handleManualRobuxAddition(interaction);
         }
+        else if (interaction.customId === 'remove_robux_modal') {
+            await handleManualRobuxRemoval(interaction);
+        }
         else if (interaction.customId === 'user_info_modal') {
             await handleUserInfoLookup(interaction);
         }
@@ -1677,6 +1719,54 @@ async function handleManualRobuxAddition(interaction) {
     } catch (error) {
         console.error('Error handling manual Robux addition:', error);
         await interaction.editReply({ content: 'An unexpected internal error occurred during the manual Robux addition. Check the bot logs for details.' });
+    }
+}
+
+/**
+ * Handles the manual removal of Robux by an Admin.
+ * @param {ModalSubmitInteraction} interaction
+ */
+async function handleManualRobuxRemoval(interaction) {
+    try {
+        const targetId = interaction.fields.getTextInputValue('remove_target_user_id');
+        const amountStr = interaction.fields.getTextInputValue('robux_amount_to_remove');
+        const reason = interaction.fields.getTextInputValue('removal_reason') || 'No reason provided';
+        const amount = parseInt(amountStr);
+
+        if (isNaN(amount) || amount <= 0) {
+            return interaction.editReply({ content: '❌ Invalid amount. Must be a positive number.' });
+        }
+        
+        const targetUser = await client.users.fetch(targetId).catch(() => null);
+        if (!targetUser) {
+            return interaction.editReply({ content: `❌ Could not find a user with the ID \`${targetId}\`.` });
+        }
+
+        // Check current balance
+        const balanceData = staffData.get(targetId);
+        const currentBalance = balanceData ? balanceData.robux_balance : 0;
+        
+        if (currentBalance < amount) {
+            return interaction.editReply({ 
+                content: `❌ Cannot remove ${amount} R$ from **${targetUser.tag}**. Their current balance is only **${currentBalance} R$**.` 
+            });
+        }
+
+        const newBalance = updateRobuxBalance(targetId, -amount);
+        
+        // Log the removal
+        console.log(`🔴 ROBUX REMOVAL: Admin ${interaction.user.tag} (${interaction.user.id}) removed ${amount} R$ from ${targetUser.tag} (${targetId}). Reason: ${reason}`);
+        
+        // Try to DM the staff member about the removal
+        await targetUser.send(`🔻 An administrator (<@${interaction.user.id}>) removed **${amount} R$** from your payout balance.\\n**Reason:** ${reason}\\n**New Balance:** ${newBalance} R$`).catch(e => console.error("Failed to DM staff member about removal:", e));
+
+        await interaction.editReply({ 
+            content: `✅ Successfully removed **${amount} R$** from **${targetUser.tag}** (<@${targetId}>).\\n**Reason:** ${reason}\\n**New Balance:** ${newBalance} R$` 
+        });
+
+    } catch (error) {
+        console.error('Error handling manual Robux removal:', error);
+        await interaction.editReply({ content: 'An unexpected internal error occurred during the manual Robux removal. Check the bot logs for details.' });
     }
 }
 
